@@ -1,3 +1,4 @@
+#include "storynarrative.h"
 #include "appsettings.h"
 #include "llmclient.h"
 #include "pipelinemanager.h"
@@ -43,13 +44,13 @@ static QJsonArray storyJson(const QString& label, int branch = 1)
     QJsonArray segments;
     const QStringList roles{"HOOK", "SETUP", "CLIMAX", "RESOLUTION"};
     const QStringList events{"BEGIN", "SECOND_BEGIN", "TURN", "SECOND_TURN", "HOOK", "SECOND_HOOK", "END", "SECOND_END"};
-    const QList<int> ids = branch == 1 ? QList<int>{5, 1, 3, 7} : QList<int>{6, 2, 4, 8};
+    const QList<int> ids = branch == 1 ? QList<int>{1, 3, 5, 7} : QList<int>{2, 4, 6, 8};
     for (int i = 0; i < ids.size(); ++i)
         segments.append(QJsonObject{{"start_phrase", ids[i]}, {"end_phrase", ids[i]},
-            {"beat", roles[i]}, {"quote", label + "_" + events[ids[i] - 1]},
+            {"event_ids", QJsonArray{QString("C1E%1").arg(ids[i])}}, {"beat", roles[i]}, {"quote", label + "_" + events[ids[i] - 1]},
             {"event", roles[i]}, {"connection", "previous event causes this one"}, {"reason", "necessary"}});
     return QJsonArray{QJsonObject{{"title", label + QString::number(branch)}, {"description", "branch"},
-        {"story_summary", "Goal, struggle, outcome."}, {"score", 90}, {"caption", "caption"},
+        {"opening_mode", "natural"}, {"hook_reason", "intrigue"}, {"story_summary", "Goal, struggle, outcome."}, {"score", 90}, {"caption", "caption"},
         {"segments", segments}}};
 }
 
@@ -60,6 +61,13 @@ public:
     int plans = 0;
     int reviews = 0;
     bool invalidEdits = false;
+    bool omitRequired = false;
+    bool viewerFailOnce = false;
+    bool viewerAlwaysFails = false;
+    bool fidelityFailOnce = false;
+    bool malformedAudit = false;
+    int repairs = 0, fidelities = 0, indexes = 0;
+    QList<QJsonObject> requests;
     MockLlm()
     {
         require(server.listen(QHostAddress::LocalHost), "cannot start local mock");
@@ -78,37 +86,58 @@ public:
                     if (data.size() - split - 4 < length) return;
                     socket->setProperty("answered", true);
                     const auto request = QJsonDocument::fromJson(data.mid(split + 4, length)).object();
+                    requests.append(request);
                     const auto messages = request.value("messages").toArray();
                     const QString system = messages.first().toObject().value("content").toString();
                     const QString label = data.contains("BETA_") ? "BETA" : "ALPHA";
                     QString content;
-                    if (messages.last().toObject().value("content").toString().contains("Ответ пока только план")) {
+                    if (system.contains("STAGE_INDEX")) {
+                        ++indexes;
+                        QJsonArray events;
+                        const auto user = messages.last().toObject()["content"].toString();
+                        const int chunk = QRegularExpression("C(\\d+)E1").match(user).captured(1).toInt();
+                        auto matches = QRegularExpression("P(\\d+) \\[([^\\]]+)\\] [^\\n]*?(" + label + "_[A-Z_]+)").globalMatch(user);
+                        while (matches.hasNext()) {
+                            const auto match = matches.next();
+                            const int id = match.captured(1).toInt();
+                            events.append(QJsonObject{{"event_id", QString("C%1E%2").arg(chunk).arg(id)},
+                                {"observed", "observed fact"}, {"evidence_phrase", id}, {"quote", match.captured(3)},
+                                {"viewer_requires", QJsonArray{}}, {"viewer_learns", QJsonArray{"fact"}},
+                                {"character_knowledge", QJsonArray{"hero knows fact"}}});
+                        }
+                        content = QString::fromUtf8(QJsonDocument(QJsonObject{{"action", "index_events"}, {"events", events}}).toJson());
+                    } else if (system.contains("STAGE_PLAN")) {
                         ++plans;
                         QJsonArray branches;
                         for (int branch = 1; branch <= 2; ++branch) {
-                            QJsonArray chain;
-                            const QList<int> ids = branch == 1 ? QList<int>{1, 3, 7} : QList<int>{2, 4, 8};
-                            for (const int id : ids)
-                                chain.append(QJsonObject{{"event", "event"}, {"because", "cause"},
-                                    {"start_phrase", id}, {"end_phrase", id}});
+                            const QJsonArray required = branch == 1 ? QJsonArray{"C1E1", "C1E3", "C1E7"} : QJsonArray{"C1E2", "C1E4", "C1E8"};
                             branches.append(QJsonObject{{"branch_id", branch}, {"title", label + QString::number(branch)},
-                                {"protagonist", "hero"}, {"goal", "goal " + QString::number(branch)},
-                                {"summary", "branch"}, {"ending", "outcome"},
-                                {"hook_start_phrase", branch == 1 ? 5 : 6}, {"hook_end_phrase", branch == 1 ? 5 : 6},
-                                {"hook_reason", "intrigue"}, {"causal_chain", chain}});
+                                {"goal", "goal " + QString::number(branch)}, {"summary", "branch"}, {"ending", "reaction"},
+                                {"opening_mode", "natural"}, {"hook_reason", "intrigue"},
+                                {"required_events", required}, {"ending_event", branch == 1 ? "C1E7" : "C1E8"}});
                         }
-                        content = QString::fromUtf8(QJsonDocument(QJsonObject{{"action", "plan_stories"},
-                            {"branches", branches}}).toJson());
+                        content = QString::fromUtf8(QJsonDocument(QJsonObject{{"action", "plan_stories"}, {"branches", branches}}).toJson());
+                    } else if (system.contains("STAGE_VIEWER") || system.contains("STAGE_FIDELITY")) {
+                        const bool viewer = system.contains("STAGE_VIEWER");
+                        if (viewer) ++reviews; else ++fidelities;
+                        const bool fail = viewer ? (viewerAlwaysFails || (viewerFailOnce && reviews == 1))
+                                                 : (fidelityFailOnce && fidelities == 1);
+                        content = malformedAudit ? "{\"pass\":true}" : QString::fromUtf8(QJsonDocument(QJsonObject{
+                            {"action", "audit"}, {"understood_story", "Observed story"}, {"pass", !fail},
+                            {"issues", fail ? QJsonArray{QJsonObject{{"block", 2}, {"kind", "missing_context"}, {"problem", "Missing motivation"}}} : QJsonArray{}}
+                        }).toJson());
                     } else {
-                        if (system.contains("редактор связности")) ++reviews;
+                        if (system.contains("STAGE_REPAIR")) ++repairs;
                         const QString user = messages.last().toObject().value("content").toString();
                         const auto match = QRegularExpression("\\\"branch_id\\\"\\s*:\\s*(\\d+)").match(user);
                         const int branch = match.hasMatch() ? match.captured(1).toInt() : 1;
                         auto stories = storyJson(label, branch);
-                        if (invalidEdits) {
+                        if (invalidEdits || omitRequired) {
                             auto story = stories[0].toObject(); auto segments = story["segments"].toArray();
-                            auto broken = segments[0].toObject(); broken["quote"] = "INVENTED_QUOTE";
-                            segments[0] = broken; story["segments"] = segments; stories[0] = story;
+                            auto broken = segments[1].toObject();
+                            if (invalidEdits) broken["quote"] = "INVENTED_QUOTE";
+                            if (omitRequired) broken["event_ids"] = QJsonArray{};
+                            segments[1] = broken; story["segments"] = segments; stories[0] = story;
                         }
                         content = QString::fromUtf8(QJsonDocument(stories).toJson());
                     }
@@ -188,6 +217,7 @@ static void runTests(const QString& python)
         phrase.text = "ALPHA_" + events[i]; phrases.append(phrase);
     }
     StoryClip clip;
+    clip.hookReason = "a compelling situation";
     clip.title = "ALPHA"; clip.storySummary = "Goal, struggle, outcome."; clip.score = 90;
     const auto jsonSegments = storyJson("ALPHA")[0].toObject()["segments"].toArray();
     for (const auto& value : jsonSegments) {
@@ -201,7 +231,7 @@ static void runTests(const QString& python)
     LlmClient client;
     QStringList notes;
     require(client.validateStoriesV3({clip}, phrases, notes).size() == 1, "whole-film branch rejected");
-    auto noHook = clip; noHook.segments[0].beat = "SETUP";
+    auto noHook = clip; noHook.hookReason.clear();
     require(client.validateStoriesV3({noHook}, phrases, notes).isEmpty(), "story without a hook accepted");
     auto bad = clip; bad.segments.last().quote = "invented ending";
     require(client.validateStoriesV3({bad}, phrases, notes).isEmpty(), "bad quote silently retained");
@@ -209,9 +239,9 @@ static void runTests(const QString& python)
     require(client.validateStoriesV3({bad}, phrases, notes).isEmpty(), "missing ending accepted");
     bad = clip; bad.score = 0;
     require(client.validateStoriesV3({bad}, phrases, notes).isEmpty(), "missing score bypassed threshold");
-    bad = clip; bad.segments[1].startSec = 95; bad.segments[1].endSec = 125;
+    bad = clip; bad.segments[0].startSec = 95; bad.segments[0].endSec = 145;
     const auto kept = client.validateStoriesV3({bad}, phrases, notes);
-    require(kept.size() == 1 && kept.first().segments[1].endSec == 125,
+    require(kept.size() == 1 && kept.first().segments[0].endSec == 145,
             "quote collapsed editorial interval");
 
     QTemporaryDir temporary;
@@ -241,7 +271,7 @@ static void runTests(const QString& python)
         [&](const QList<StoryClip>& result, const QJsonArray& raw) {
             found = result.size() == 2 && result.first().totalSec() == 65
                 && !result.first().narrativePlan.isEmpty() && raw.size() == 2
-                && mock.calls == 5 && mock.reviews == 2;
+                && mock.calls == 8 && mock.reviews == 2 && mock.fidelities == 2 && mock.indexes == 1;
             agentLoop.quit();
         });
     QObject::connect(&client, &LlmClient::errorOccurred, &agentLoop, [&](const QString& error) {
@@ -257,10 +287,90 @@ static void runTests(const QString& python)
     agentLoop.exec();
     require(found, "multiple stories with hook/edit/review did not complete before output");
     const QDir logDirectory(temporary.filePath("standalone_logs"));
-    require(logDirectory.entryList({"*.request.json"}, QDir::Files).size() == 5, "requests were not logged");
-    require(logDirectory.entryList({"*.response.txt"}, QDir::Files).size() == 5, "responses were not logged");
+    require(logDirectory.entryList({"*.request.json"}, QDir::Files).size() == 8, "requests were not logged");
+    require(logDirectory.entryList({"*.response.txt"}, QDir::Files).size() == 8, "responses were not logged");
     for (const auto& name : logDirectory.entryList({"*.json"}, QDir::Files))
         require(!readFile(logDirectory.filePath(name)).contains("test-secret-do-not-log"), "API key leaked into logs");
+    // Viewer sees only selected dialogue, never metadata, another branch or omitted source.
+    int viewers = 0;
+    for (const auto& request : mock.requests) {
+        const auto messages = request["messages"].toArray();
+        if (!messages.first().toObject()["content"].toString().contains("STAGE_VIEWER")) continue;
+        ++viewers;
+        const auto user = messages[1].toObject()["content"].toString();
+        require(messages.size() == 2 && !user.contains("branch_id") && !user.contains("goal")
+                && !user.contains("C1E") && !user.contains("P000") && !user.contains("Источник"),
+                "editorial/source metadata leaked to blind viewer");
+        require(viewers == 1 ? !user.contains("SECOND_") : !user.contains("ALPHA_BEGIN"),
+                "unselected dialogue leaked to blind viewer");
+    }
+    require(viewers == 2, "viewer audit skipped");
+    auto natural = clip;
+    natural.segments = {clip.segments.first()};
+    natural.segments[0].endSec = natural.segments[0].startSec + 65;
+    natural.segments[0].beat = "REACTION";
+    notes.clear();
+    require(client.validateStoriesV3({}, phrases, notes).isEmpty(), "empty montage accepted");
+    LlmClient standalone;
+    notes.clear();
+    require(standalone.validateStoriesV3({natural}, phrases, notes).size() == 1,
+            "natural opening/long single interval still requires four dramatic roles");
+    natural.openingMode = "cold_open";
+    notes.clear();
+    require(standalone.validateStoriesV3({natural}, phrases, notes).isEmpty(), "long cold open accepted");
+    const auto windows = StoryNarrative::chunks(phrases, 180);
+    QSet<int> seen;
+    for (const auto& window : windows) for (const auto& phrase : window) seen.insert(phrase.id);
+    require(windows.size() > 1 && seen.size() == phrases.size(), "event chunking loses source phrases");
+    QJsonArray eventMap;
+    QString mapError;
+    QJsonObject event{{"event_id", "C1E1"}, {"observed", "a fact"},
+        {"evidence_phrase", 1}, {"quote", phrases.first().text},
+        {"viewer_requires", QJsonArray{}}, {"viewer_learns", QJsonArray{"a fact"}},
+        {"character_knowledge", QJsonArray{}}};
+    auto invalidEvent = event; invalidEvent["event_id"] = "C1E2"; invalidEvent["evidence_phrase"] = 999;
+    require(!StoryNarrative::acceptEvents({{"action", "index_events"}, {"events", QJsonArray{event, invalidEvent}}},
+                phrases, 1, eventMap, mapError) && eventMap.isEmpty(),
+            "invalid map partially mutated state or accepted unknown evidence");
+    require(StoryNarrative::acceptEvents({{"action", "index_events"}, {"events", QJsonArray{event}}},
+                phrases, 1, eventMap, mapError) && eventMap.size() == 1,
+            "valid event evidence rejected");
+    require(!StoryNarrative::acceptEvents({{"action", "index_events"}, {"events", QJsonArray{event}}},
+                phrases, 1, eventMap, mapError), "duplicate event ID accepted");
+    eventMap = {}; auto uncertainPhrases = phrases; uncertainPhrases.first().flagCheck = true;
+    require(!StoryNarrative::acceptEvents({{"action", "index_events"}, {"events", QJsonArray{event}}},
+                uncertainPhrases, 1, eventMap, mapError), "uncertain phrase accepted as sole evidence");
+    QString auditError;
+    require(!StoryNarrative::acceptAudit({{"action", "audit"}, {"pass", true},
+                {"understood_story", "story"}, {"issues", QJsonArray{QJsonObject{{"block", 1}, {"kind", "gap"}, {"problem", "gap"}}}}}, 2, auditError),
+            "contradictory audit accepted");
+    auto runScenario = [&](bool failOnce, bool alwaysFail, bool malformed, bool omit, bool fidelityFail) {
+        MockLlm scenario;
+        scenario.viewerFailOnce = failOnce; scenario.viewerAlwaysFails = alwaysFail;
+        scenario.malformedAudit = malformed; scenario.omitRequired = omit; scenario.fidelityFailOnce = fidelityFail;
+        settings.llmBaseUrl = scenario.url();
+        LlmClient candidate;
+        QEventLoop loop;
+        bool success = false, failed = false;
+        QObject::connect(&candidate, &LlmClient::storiesFound, &loop, [&](const QList<StoryClip>&, const QJsonArray&) { success = true; loop.quit(); });
+        QObject::connect(&candidate, &LlmClient::errorOccurred, &loop, [&](const QString&) { failed = true; loop.quit(); });
+        QTimer timeout; timeout.setSingleShot(true);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timeout.start(10000);
+        candidate.findStoriesV3(info, packed, phrases); loop.exec();
+        if (alwaysFail || malformed || omit) require(failed && !success, "failed audit/missing required event reached render");
+        else require(success && !failed, "repair did not complete");
+        if (failOnce || fidelityFail) require(scenario.repairs == 1 && scenario.reviews == 3,
+                "repair was not checked again by isolated viewer");
+        if (alwaysFail) require(scenario.repairs == 4 && scenario.reviews == 6, "repair budget is not bounded per branch");
+        if (omit) require(scenario.reviews == 0, "missing mandatory event reached reviewer");
+    };
+    runScenario(true, false, false, false, false);
+    runScenario(false, false, false, false, true);
+    runScenario(false, true, false, false, false);
+    runScenario(false, false, true, false, false);
+    runScenario(false, false, false, true, false);
+    settings.llmBaseUrl = mock.url();
     QList<SrtCue> tinyWords;
     for (int i = 0; i < 4; ++i) {
         SrtCue cue; cue.startSec = i * .18; cue.endSec = cue.startSec + .16; cue.text = "word";
@@ -344,7 +454,7 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
     queueLoop.exec();
     require(readFile(temporary.filePath("alpha_clips/temp/asr_calls.txt")) == "2",
             "changed ASR settings reused old transcript");
-    require(mock.plans == 4 && mock.reviews == 8, "narrative stages skipped in queue");
+    require(mock.plans == 4 && mock.reviews == 8 && mock.fidelities == 8, "narrative stages skipped in queue");
     const auto originalEdl = readFile(temporary.filePath("alpha_clips/stories.json"));
     mock.invalidEdits = true;
     manager.addFilesToQueue({alpha}); queueLoop.exec();

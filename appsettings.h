@@ -125,7 +125,7 @@ public:
     double s3MaxClipSec = 180.0;
     double s3MaxSpanSec = 0.0;       // 0: ветка может охватывать весь фильм
     int s3MaxSegments = 12;
-    double s3MaxSegmentSec = 35.0;
+    double s3MaxSegmentSec = 35.0; // preferred block length, not a hard rejection limit
     int s3SubtitleFontSize = 58;  // pixels at 1080x1920
     int s3SubtitleWords = 4;
 

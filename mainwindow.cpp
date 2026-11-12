@@ -428,11 +428,11 @@ void MainWindow::buildSettingsTab()
     s3->addRow("Охват исходного фильма:", spS3MaxSpan);
 
     spS3MaxSegments = new QSpinBox(this);
-    spS3MaxSegments->setRange(4, 30);
+    spS3MaxSegments->setRange(1, 30);
     s3->addRow("Макс. склеек в клипе:", spS3MaxSegments);
     spS3MaxSegmentSec = new QSpinBox(this);
     spS3MaxSegmentSec->setRange(8, 90); spS3MaxSegmentSec->setSuffix(" с");
-    s3->addRow("Макс. длина блока V3:", spS3MaxSegmentSec);
+    s3->addRow("Ориентир длины блока V3:", spS3MaxSegmentSec);
     spS3SubtitleFontSize = new QSpinBox(this);
     spS3SubtitleFontSize->setRange(32, 90); spS3SubtitleFontSize->setSuffix(" px");
     s3->addRow("Размер субтитров V3:", spS3SubtitleFontSize);

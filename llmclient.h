@@ -26,6 +26,7 @@ struct StorySegment {
     int endPhrase = 0;
     QString event;
     QString connection; // причинная связь с предыдущим фрагментом
+    QStringList eventIds;
 };
 
 // Клип-пересказ и его монтажные блоки; V3 сохраняет план сюжетной ветки.
@@ -38,6 +39,8 @@ struct StoryClip {
     QList<StorySegment> segments;
     QString storySummary;
     QJsonObject narrativePlan;
+    QString openingMode = "natural";
+    QString hookReason;
 
     double totalSec() const {
         double t = 0.0;
@@ -64,7 +67,7 @@ public:
     // (сигнал storyFramesRequested), смотрит их и выдаёт финальный EDL коротких моментов.
     void findStories(const MediaInfo& info, const QString& packedTranscript);
 
-    // V3: план одной сюжетной ветки -> монтаж -> проверка связности.
+    // V3: события -> замыслы -> монтаж -> зритель -> верность -> исправление.
     void findStoriesV3(const MediaInfo& info, const QString& packedTranscript,
                        const QList<S3Phrase>& phrases);
     void deliverStoryFramesV3(const QList<QPair<double, QString>>& frames);
@@ -125,7 +128,7 @@ private:
     int m_story3Sent = 0;
     bool m_story3Retried = false;
     QJsonArray m_story3Messages;
-    enum class Story3Phase { Plan, Edit, Review };
+    enum class Story3Phase { Index, Plan, Edit, Viewer, Fidelity, Repair };
     Story3Phase m_story3Phase = Story3Phase::Plan;
     QJsonObject m_story3Plan;
     QJsonArray m_story3Plans;
@@ -136,6 +139,17 @@ private:
     QString storyFramesInstructionsV3() const;
     bool acceptStoryPlanV3(const QString& content, QString& error);
     void reviewStoryDraftV3(const QList<StoryClip>& draft);
+    void startStoryPlanV3();
+    void nextEventChunkV3();
+    void auditStoryV3(bool fidelity);
+    void repairStoryV3(const QJsonObject& report);
+    void rejectStoryV3(const QString& reason);
+    bool checkEventCoverageV3(const StoryClip& clip, QStringList& notes) const;
+    QJsonArray m_story3Events;
+    QList<QList<S3Phrase>> m_story3Chunks;
+    int m_story3Chunk = -1;
+    int m_story3Repairs = 0;
+    QList<StoryClip> m_story3Draft;
 
     // Общая подготовка текста сабов по настройке; false — текста нет
     bool buildSubsText(const QString& subsRu, const QString& subsEn);

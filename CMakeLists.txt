@@ -28,6 +28,7 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         metadataparser.h metadataparser.cpp
         appsettings.h appsettings.cpp
         llmclient.h llmclient.cpp
+        storynarrative.h storynarrative.cpp
         whisperrunner.h whisperrunner.cpp
         cliprenderer.h cliprenderer.cpp
         srtutils.h srtutils.cpp
@@ -94,7 +95,7 @@ if(CONTENT_CLIPPER_BUILD_TESTS)
     enable_testing()
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_executable(test_stories3 tests/test_stories3.cpp
-        appsettings.cpp llmclient.cpp s3cache.cpp stories3runner.cpp stories3pipeline.cpp
+        appsettings.cpp llmclient.cpp storynarrative.cpp s3cache.cpp stories3runner.cpp stories3pipeline.cpp
         pipelinemanager.cpp mediaextractor.cpp metadataparser.cpp whisperrunner.cpp
         cliprenderer.cpp srtutils.cpp subtitlecomposer.cpp transcriptpacker.cpp diarizerunner.cpp)
     target_include_directories(test_stories3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
