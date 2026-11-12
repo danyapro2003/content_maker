@@ -82,3 +82,15 @@ CMakeLists.txt.user*
 .uic/
 /build*/
 /.qtcreator/
+
+# Local Python environments, models, credentials and media outputs
+/.venv*/
+__pycache__/
+.pytest_cache/
+settings.json
+.env
+.env.*
+*.onnx
+*.safetensors
+*.gguf
+*_clips/

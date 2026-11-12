@@ -6,45 +6,113 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>800</width>
-    <height>600</height>
+    <width>900</width>
+    <height>700</height>
    </rect>
   </property>
   <property name="windowTitle">
-   <string>MainWindow</string>
+   <string>Content Clipper</string>
   </property>
   <widget class="QWidget" name="centralwidget">
    <layout class="QVBoxLayout" name="verticalLayout">
     <item>
-     <layout class="QHBoxLayout" name="horizontalLayout">
-      <property name="sizeConstraint">
-       <enum>QLayout::SizeConstraint::SetDefaultConstraint</enum>
+     <widget class="QTabWidget" name="tabWidget">
+      <property name="currentIndex">
+       <number>0</number>
       </property>
-      <item>
-       <widget class="QLineEdit" name="browse_le">
-        <property name="text">
-         <string>E:/пауки</string>
-        </property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QPushButton" name="browse_pb">
-        <property name="text">
-         <string>Browse</string>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </item>
-    <item>
-     <widget class="QPushButton" name="getmeta_pb">
-      <property name="text">
-       <string>get metadata</string>
-      </property>
+      <widget class="QWidget" name="tab_pipeline">
+       <attribute name="title">
+        <string>Пайплайн</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="pipelineLayout">
+        <item>
+         <layout class="QHBoxLayout" name="browseLayout">
+          <item>
+           <widget class="QLineEdit" name="browse_le">
+            <property name="placeholderText">
+             <string>Путь к видеофайлу или папке с видео</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="browse_file_pb">
+            <property name="text">
+             <string>Файл...</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="browse_folder_pb">
+            <property name="text">
+             <string>Папка...</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="startLayout">
+          <item>
+           <widget class="QComboBox" name="mode_cb">
+            <item>
+             <property name="text">
+              <string>Хайлайты (виральные моменты)</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Пересказ (история из склеек)</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Пересказ 3.0 (чистый транскрипт)</string>
+             </property>
+            </item>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="start_pb">
+            <property name="text">
+             <string>Старт пайплайна</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QLabel" name="clips_label">
+          <property name="text">
+           <string>Найденные клипы:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QTableWidget" name="clips_tw"/>
+        </item>
+        <item>
+         <widget class="QLabel" name="log_label">
+          <property name="text">
+           <string>Лог:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QTextEdit" name="log_te">
+          <property name="readOnly">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QWidget" name="tab_settings">
+       <attribute name="title">
+        <string>Настройки</string>
+       </attribute>
+       <layout class="QVBoxLayout" name="settingsLayout"/>
+      </widget>
      </widget>
-    </item>
-    <item>
-     <widget class="QTextEdit" name="textEdit"/>
     </item>
    </layout>
   </widget>
@@ -53,7 +121,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>800</width>
+     <width>900</width>
      <height>21</height>
     </rect>
    </property>

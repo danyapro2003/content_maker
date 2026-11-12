@@ -1,0 +1,34 @@
+#ifndef CLIPRENDERER_H
+#define CLIPRENDERER_H
+
+#include <QObject>
+
+class ClipRenderer : public QObject
+{
+    Q_OBJECT
+
+public:
+    ClipRenderer();
+
+    // Один проход ffmpeg: нарезка [startSec, endSec] + вертикаль 9:16 (blur background)
+    // + прожиг субтитров srtPath (слово-за-словом) + аудиодорожка audioIndex.
+    void renderClip(const QString& inputPath, double startSec, double endSec,
+                    int audioIndex, const QString& srtPath, const QString& outPath);
+
+    // Клип-пересказ: склейка нескольких сегментов + 9:16 + прожиг сабов + аудиодорожка.
+    // crossfadeSec > 0 — xfade/acrossfade между сегментами.
+    void renderStoryClip(const QString& inputPath, const QList<QPair<double, double>>& segments,
+                         int audioIndex, const QString& srtPath, const QString& outPath,
+                         double crossfadeSec = 0.0);
+
+signals:
+    void clipRendered(const QString& outPath);
+    void errorOccurred(const QString& errorMessage);
+
+private:
+    void startFfmpeg(const QStringList& args, const QString& workDir, const QString& outPath);
+
+    QString m_currentOutPath;
+};
+
+#endif // CLIPRENDERER_H
