@@ -521,10 +521,53 @@ void LlmClient::nextEventChunkV3()
         startStoryPlanV3(); return;
     }
     m_story3Phase = Story3Phase::Index; m_story3Retried = false; m_story3Sent = 0; m_story3Turn = 0;
+    m_story3IndexPending = {}; m_story3IndexRepairs = 0;
     m_story3Messages = {
         QJsonObject{{"role", "system"}, {"content", "Ты — аналитик событий. STAGE_INDEX. Используй только предоставленный материал."}},
         QJsonObject{{"role", "user"}, {"content", StoryNarrative::indexPrompt(m_story3Chunks[m_story3Chunk], m_story3Chunk + 1)}}};
     emit logMessage(QString("LLM v3: карта событий, окно %1/%2.").arg(m_story3Chunk + 1).arg(m_story3Chunks.size()));
+    runStoryTurnV3();
+}
+
+void LlmClient::handleEventResponseV3(const QJsonObject& response)
+{
+    const int number = m_story3Chunk + 1;
+    const auto& chunk = m_story3Chunks[m_story3Chunk];
+    const auto checked = m_story3IndexPending.isEmpty()
+        ? StoryNarrative::checkEvents(response, chunk, number, m_story3Events)
+        : StoryNarrative::checkEventRepairs(response, m_story3IndexPending, chunk, number, m_story3Events);
+    for (const auto& event : checked.accepted) m_story3Events.append(event);
+    m_story3IndexPending = checked.rejected;
+    writeRunArtifact(m_lastRequestPrefix + ".validation.json", checked.report());
+    QJsonArray saved;
+    for (const auto& value : m_story3Events)
+        if (value.toObject()["event_id"].toString().startsWith(QString("C%1E").arg(number))) saved.append(value);
+    writeRunArtifact(QString("index_%1.events.json").arg(number), {
+        {"complete", checked.complete()}, {"events", saved}, {"pending", m_story3IndexPending},
+        {"notes", QJsonArray::fromStringList(checked.errors)}, {"repair_requests", m_story3IndexRepairs}});
+    if (!checked.corrections.isEmpty())
+        emit logMessage(QString("LLM v3: окно %1 — восстановлено ссылок по однозначным цитатам: %2; подробности в validation.json.")
+            .arg(number).arg(checked.corrections.size()));
+    if (checked.complete()) { nextEventChunkV3(); return; }
+
+    constexpr int maxRepairs = 2;
+    if (m_story3IndexRepairs >= maxRepairs) {
+        emit errorOccurred(QString("V3: окно %1 карты событий не исправлено за %2 запроса. %3")
+            .arg(number).arg(maxRepairs).arg(checked.errors.mid(0, 5).join("\n")));
+        return;
+    }
+    ++m_story3IndexRepairs;
+    const auto prompt = m_story3IndexPending.isEmpty()
+        ? StoryNarrative::indexPrompt(chunk, number) + "\nОшибка предыдущего ответа:\n" + checked.errors.join("\n")
+        : StoryNarrative::eventRepairPrompt(chunk, number, m_story3IndexPending, m_story3Events)
+            + "\nЗамечания к ответу:\n" + checked.errors.join("\n");
+    // The accepted records stay in code. Only the failed records are regenerated.
+    m_story3Messages = {
+        QJsonObject{{"role", "system"}, {"content", "Ты — аналитик событий. STAGE_INDEX. Используй только предоставленный материал."}},
+        QJsonObject{{"role", "user"}, {"content", prompt}}};
+    emit logMessage(QString("LLM v3: окно %1 — сохранено событий %2, требуют исправления %3; запрос исправления %4/%5. %6")
+        .arg(number).arg(saved.size()).arg(m_story3IndexPending.size()).arg(m_story3IndexRepairs).arg(maxRepairs)
+        .arg(checked.errors.value(0)));
     runStoryTurnV3();
 }
 
@@ -705,10 +748,7 @@ void LlmClient::runStoryTurnV3()
         QString error;
         const auto object = storyObject(content);
         if (m_story3Phase == Story3Phase::Index) {
-            if (StoryNarrative::acceptEvents(object, m_story3Chunks[m_story3Chunk], m_story3Chunk + 1, m_story3Events, error)) {
-                nextEventChunkV3(); return;
-            }
-            notes << error;
+            handleEventResponseV3(object); return;
         } else if (m_story3Phase == Story3Phase::Plan) {
             if (acceptStoryPlanV3(content, error)) { startNextStoryBranchV3(); return; }
             notes << error;

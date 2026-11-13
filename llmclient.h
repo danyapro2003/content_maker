@@ -141,11 +141,14 @@ private:
     void reviewStoryDraftV3(const QList<StoryClip>& draft);
     void startStoryPlanV3();
     void nextEventChunkV3();
+    void handleEventResponseV3(const QJsonObject& response);
     void auditStoryV3(bool fidelity);
     void repairStoryV3(const QJsonObject& report);
     void rejectStoryV3(const QString& reason);
     bool checkEventCoverageV3(const StoryClip& clip, QStringList& notes) const;
     QJsonArray m_story3Events;
+    QJsonArray m_story3IndexPending;
+    int m_story3IndexRepairs = 0;
     QList<QList<S3Phrase>> m_story3Chunks;
     int m_story3Chunk = -1;
     int m_story3Repairs = 0;

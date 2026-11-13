@@ -19,6 +19,9 @@
 #include <QTimer>
 #include <stdexcept>
 
+void testEventIndex();
+void replayEventIndex(const QString& directory, const QString& packedPath);
+
 static void require(bool condition, const char* message)
 {
     if (!condition) throw std::runtime_error(message);
@@ -66,6 +69,7 @@ public:
     bool viewerAlwaysFails = false;
     bool fidelityFailOnce = false;
     bool malformedAudit = false;
+    int indexFailure = 0; // 1: recover, 2: bad repair, 3: omitted repair, 4: bad envelope
     int repairs = 0, fidelities = 0, indexes = 0;
     QList<QJsonObject> requests;
     MockLlm()
@@ -105,7 +109,29 @@ public:
                                 {"viewer_requires", QJsonArray{}}, {"viewer_learns", QJsonArray{"fact"}},
                                 {"character_knowledge", QJsonArray{"hero knows fact"}}});
                         }
-                        content = QString::fromUtf8(QJsonDocument(QJsonObject{{"action", "index_events"}, {"events", events}}).toJson());
+                        if (user.contains("STAGE_INDEX_REPAIR")) {
+                            const auto start = user.indexOf("Цели исправления:\n") + QString("Цели исправления:\n").size();
+                            const auto end = user.indexOf("\nМатериал:\n", start);
+                            const auto pending = QJsonDocument::fromJson(user.mid(start, end - start).toUtf8()).array();
+                            QJsonArray repairs;
+                            if (indexFailure != 3) for (const auto& value : pending) {
+                                const auto target = value.toObject();
+                                const auto id = target["event"].toObject()["event_id"];
+                                for (const auto& good : events) if (good.toObject()["event_id"] == id) {
+                                    auto fixed = good.toObject();
+                                    if (indexFailure == 2) fixed["quote"] = "INVENTED_INDEX_QUOTE";
+                                    repairs.append(QJsonObject{{"repair_id", target["repair_id"]}, {"event", fixed}});
+                                }
+                            }
+                            content = QString::fromUtf8(QJsonDocument(QJsonObject{{"action", "repair_events"}, {"repairs", repairs}}).toJson());
+                        } else if (indexFailure == 4 && indexes == 1) {
+                            content = "{}";
+                        } else {
+                            if (indexFailure >= 1 && indexFailure <= 3 && !events.isEmpty()) {
+                                auto broken = events.first().toObject(); broken["quote"] = "INVENTED_INDEX_QUOTE"; events[0] = broken;
+                            }
+                            content = QString::fromUtf8(QJsonDocument(QJsonObject{{"action", "index_events"}, {"events", events}}).toJson());
+                        }
                     } else if (system.contains("STAGE_PLAN")) {
                         ++plans;
                         QJsonArray branches;
@@ -322,24 +348,7 @@ static void runTests(const QString& python)
     QSet<int> seen;
     for (const auto& window : windows) for (const auto& phrase : window) seen.insert(phrase.id);
     require(windows.size() > 1 && seen.size() == phrases.size(), "event chunking loses source phrases");
-    QJsonArray eventMap;
-    QString mapError;
-    QJsonObject event{{"event_id", "C1E1"}, {"observed", "a fact"},
-        {"evidence_phrase", 1}, {"quote", phrases.first().text},
-        {"viewer_requires", QJsonArray{}}, {"viewer_learns", QJsonArray{"a fact"}},
-        {"character_knowledge", QJsonArray{}}};
-    auto invalidEvent = event; invalidEvent["event_id"] = "C1E2"; invalidEvent["evidence_phrase"] = 999;
-    require(!StoryNarrative::acceptEvents({{"action", "index_events"}, {"events", QJsonArray{event, invalidEvent}}},
-                phrases, 1, eventMap, mapError) && eventMap.isEmpty(),
-            "invalid map partially mutated state or accepted unknown evidence");
-    require(StoryNarrative::acceptEvents({{"action", "index_events"}, {"events", QJsonArray{event}}},
-                phrases, 1, eventMap, mapError) && eventMap.size() == 1,
-            "valid event evidence rejected");
-    require(!StoryNarrative::acceptEvents({{"action", "index_events"}, {"events", QJsonArray{event}}},
-                phrases, 1, eventMap, mapError), "duplicate event ID accepted");
-    eventMap = {}; auto uncertainPhrases = phrases; uncertainPhrases.first().flagCheck = true;
-    require(!StoryNarrative::acceptEvents({{"action", "index_events"}, {"events", QJsonArray{event}}},
-                uncertainPhrases, 1, eventMap, mapError), "uncertain phrase accepted as sole evidence");
+    testEventIndex();
     QString auditError;
     require(!StoryNarrative::acceptAudit({{"action", "audit"}, {"pass", true},
                 {"understood_story", "story"}, {"issues", QJsonArray{QJsonObject{{"block", 1}, {"kind", "gap"}, {"problem", "gap"}}}}}, 2, auditError),
@@ -370,6 +379,34 @@ static void runTests(const QString& python)
     runScenario(false, true, false, false, false);
     runScenario(false, false, true, false, false);
     runScenario(false, false, false, true, false);
+    for (int mode : {1, 2, 3, 4}) {
+        MockLlm scenario; scenario.indexFailure = mode;
+        settings.llmBaseUrl = scenario.url();
+        LlmClient candidate;
+        const auto logDir = temporary.filePath(QString("index_repair_%1").arg(mode));
+        candidate.setRunLogDirectory(logDir);
+        QEventLoop loop;
+        bool success = false, failed = false;
+        QObject::connect(&candidate, &LlmClient::storiesFound, &loop, [&](const QList<StoryClip>&, const QJsonArray&) { success = true; loop.quit(); });
+        QObject::connect(&candidate, &LlmClient::errorOccurred, &loop, [&](const QString&) { failed = true; loop.quit(); });
+        QTimer timeout; timeout.setSingleShot(true);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timeout.start(10000);
+        candidate.findStoriesV3(info, packed, phrases); loop.exec();
+        const bool expectedSuccess = mode == 1 || mode == 4;
+        require(success == expectedSuccess && failed != expectedSuccess, "index repair outcome wrong");
+        require(scenario.indexes == (expectedSuccess ? 2 : 3), "index repair budget not respected");
+        const auto saved = QJsonDocument::fromJson(readFile(logDir + "/index_1.events.json")).object();
+        require(saved["events"].toArray().size() == (expectedSuccess ? 8 : 7), "checked events lost/duplicated during repair");
+        require(saved["complete"].toBool() == expectedSuccess, "partial map falsely marked complete");
+        if (!expectedSuccess) require(scenario.plans == 0 && saved["pending"].toArray().size() == 1,
+                                      "unresolved index proceeded to planning");
+        if (mode != 4) {
+            const auto repairMessages = scenario.requests[1]["messages"].toArray();
+            require(repairMessages.size() == 2 && repairMessages.last().toObject()["content"].toString().contains("R1"),
+                    "index repair regenerated entire history instead of failed record");
+        }
+    }
     settings.llmBaseUrl = mock.url();
     QList<SrtCue> tinyWords;
     for (int i = 0; i < 4; ++i) {
@@ -479,6 +516,11 @@ int main(int argc, char** argv)
     QCoreApplication app(argc, argv);
     try {
         if (fakeTool(app.arguments())) return 0;
+        if (app.arguments().contains("--replay-events")) {
+            require(argc == 4, "--replay-events log-directory packed-transcript.md");
+            replayEventIndex(app.arguments()[2], app.arguments()[3]);
+            return 0;
+        }
         if (app.arguments().contains("--compose")) {
             require(argc == 4, "--compose input.srt output.ass");
             require(SubtitleComposer::writeAss(SrtUtils::parseFile(QString::fromLocal8Bit(argv[2])),
