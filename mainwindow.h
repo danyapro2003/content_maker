@@ -49,6 +49,7 @@ private:
     QLineEdit* leLlmBaseUrl = nullptr;
     QLineEdit* leLlmKey = nullptr;
     QLineEdit* leLlmModel = nullptr;
+    QSpinBox* spLlmTimeout = nullptr;
     QComboBox* cbSubsForLlm = nullptr;
     QCheckBox* chkRenderRu = nullptr;
     QCheckBox* chkRenderEn = nullptr;

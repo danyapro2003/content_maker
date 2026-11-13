@@ -21,7 +21,8 @@ public:
         int baseDelayMs = 60000;
         int maxBackoffMs = 180000;
         int maxRetryAfterMs = 600000;
-        int requestTimeoutMs = 300000;
+        int requestTimeoutMs = 900000;
+        int progressIntervalMs = 30000;
     };
     using Completion = std::function<void(bool, const QString&, const QString&)>;
 
@@ -30,7 +31,7 @@ public:
     ~LlmTransport() override;
     void send(const QNetworkRequest& request, const QJsonObject& body,
               const QString& stage, const QString& prefix, const QString& logDirectory,
-              Completion completion);
+              Completion completion, int timeoutMs = 0);
     // Silent cancellation: no completion callback or late retry in the next run.
     void cancel();
     static qint64 retryAfterMs(const QByteArray& header, const QDateTime& now);

@@ -207,6 +207,12 @@ void MainWindow::buildSettingsTab()
     form->addRow("LLM API key:", leLlmKey);
     leLlmModel = new QLineEdit(this);
     form->addRow("LLM модель:", leLlmModel);
+    spLlmTimeout = new QSpinBox(this);
+    spLlmTimeout->setRange(1, 60);
+    spLlmTimeout->setSuffix(" мин");
+    spLlmTimeout->setToolTip("Сколько ждать один ответ. После тайм-аута запрос автоматически не повторяется: "
+                            "сервер мог продолжить генерацию и учесть её расход.");
+    form->addRow("Ожидание ответа LLM:", spLlmTimeout);
 
     cbSubsForLlm = new QComboBox(this);
     cbSubsForLlm->addItem("Русские + Английские", "both");
@@ -472,6 +478,7 @@ void MainWindow::loadSettingsToUi()
     leLlmBaseUrl->setText(s.llmBaseUrl);
     leLlmKey->setText(s.llmApiKey);
     leLlmModel->setText(s.llmModel);
+    spLlmTimeout->setValue(s.llmTimeoutMinutes);
 
     QString subs = s.subsForLlm == AppSettings::SubsForLlm::RuOnly ? "ru"
                  : s.subsForLlm == AppSettings::SubsForLlm::EnOnly ? "en" : "both";
@@ -544,6 +551,7 @@ void MainWindow::saveSettingsFromUi()
     s.llmBaseUrl = leLlmBaseUrl->text().trimmed();
     s.llmApiKey = leLlmKey->text().trimmed();
     s.llmModel = leLlmModel->text().trimmed();
+    s.llmTimeoutMinutes = spLlmTimeout->value();
 
     QString subs = cbSubsForLlm->currentData().toString();
     s.subsForLlm = subs == "ru" ? AppSettings::SubsForLlm::RuOnly

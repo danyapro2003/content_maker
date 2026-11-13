@@ -44,6 +44,9 @@ struct Response {
     QByteArray retryAfter;
     QByteArray body = successBody();
     bool hang = false;
+    int delayMs = 0;
+    bool truncated = false;
+    bool disconnect = false;
 };
 
 class MockServer {
@@ -71,13 +74,18 @@ public:
                     const auto response = responses.value(bodies.size(), responses.last());
                     bodies.append(data.mid(split + 4, length));
                     headers.append(data.left(split));
-                    if (response.hang) return;
-                    QByteArray head = "HTTP/1.1 " + QByteArray::number(response.status) + " Test\r\n"
-                        "Content-Type: application/json\r\nConnection: close\r\n";
-                    if (!response.retryAfter.isEmpty()) head += "Retry-After: " + response.retryAfter + "\r\n";
-                    socket->write(head + "Content-Length: " + QByteArray::number(response.body.size())
-                                  + "\r\n\r\n" + response.body);
-                    socket->disconnectFromHost();
+                    if (response.disconnect) { socket->disconnectFromHost(); return; }
+                    if (response.hang && !response.truncated) return;
+                    auto answer = [socket, response]() {
+                        QByteArray head = "HTTP/1.1 " + QByteArray::number(response.status) + " Test\r\n"
+                            "Content-Type: application/json\r\nConnection: close\r\nX-Request-Id: fixture-request\r\n";
+                        if (!response.retryAfter.isEmpty()) head += "Retry-After: " + response.retryAfter + "\r\n";
+                        socket->write(head + "Content-Length: " + QByteArray::number(response.body.size())
+                                      + "\r\n\r\n" + (response.truncated ? response.body.left(8) : response.body));
+                        if (!response.hang) socket->disconnectFromHost();
+                    };
+                    if (response.delayMs > 0) QTimer::singleShot(response.delayMs, socket, answer);
+                    else answer();
                 });
             }
         });
@@ -98,6 +106,7 @@ static LlmTransport::RetryPolicy fastPolicy()
     policy.maxBackoffMs = 30;
     policy.maxRetryAfterMs = 1000;
     policy.requestTimeoutMs = 2000;
+    policy.progressIntervalMs = 20;
     return policy;
 }
 
@@ -109,7 +118,8 @@ static void drain(int milliseconds)
 }
 
 static void testCase(const QList<Response>& sequence, int expectedAttempts, bool expectedSuccess,
-                     const LlmTransport::RetryPolicy& policy = fastPolicy(), int minimumMs = 0)
+                     const LlmTransport::RetryPolicy& policy = fastPolicy(), int minimumMs = 0,
+                     int timeoutOverrideMs = 0, bool expectedUnknown = false)
 {
     MockServer server(sequence);
     LlmTransport transport(policy);
@@ -121,6 +131,10 @@ static void testCase(const QList<Response>& sequence, int expectedAttempts, bool
     int callbacks = 0;
     bool success = false;
     QString content, finalPrefix;
+    int progressMessages = 0;
+    QObject::connect(&transport, &LlmTransport::logMessage, &loop, [&](const QString& text) {
+        if (text.contains("HTTP-заголовки")) ++progressMessages;
+    });
     QTimer watchdog;
     watchdog.setSingleShot(true);
     QObject::connect(&watchdog, &QTimer::timeout, &loop, &QEventLoop::quit);
@@ -130,7 +144,7 @@ static void testCase(const QList<Response>& sequence, int expectedAttempts, bool
     transport.send(server.request(), body, "index_1", "001_index_1", logs.path(),
         [&](bool ok, const QString& text, const QString& prefix) {
             ++callbacks; success = ok; content = text; finalPrefix = prefix; loop.quit();
-        });
+        }, timeoutOverrideMs);
     loop.exec();
     require(callbacks == 1, "request did not finish exactly once");
     require(success == expectedSuccess, "wrong completion status");
@@ -138,6 +152,10 @@ static void testCase(const QList<Response>& sequence, int expectedAttempts, bool
     drain(50);
     require(callbacks == 1 && server.bodies.size() == expectedAttempts, "extra request or callback");
     if (success) require(content == "OK", "successful content lost");
+    if (expectedUnknown) {
+        require(content.contains("Автоповтор отключён"), "unknown outcome not explained");
+        if (sequence.first().hang) require(progressMessages > 0, "waiting has no progress messages");
+    }
     if (!success && expectedAttempts == policy.maxAttempts)
         require(content.contains("4/4"), "exhaustion not explained");
     const auto files = QDir(logs.path()).entryList({"*.request.json"}, QDir::Files);
@@ -150,6 +168,15 @@ static void testCase(const QList<Response>& sequence, int expectedAttempts, bool
         const auto response = QJsonDocument::fromJson(readFile(logs.filePath(prefix + ".response.json"))).object();
         require(response["attempt"].toInt() == i + 1, "wrong attempt number");
         require(response["will_retry"].toBool() == (i < expectedAttempts - 1), "wrong retry log");
+        require(response["outcome_unknown"].toBool() == expectedUnknown, "unknown delivery outcome not logged");
+        const int expectedTimeout = timeoutOverrideMs > 0 ? timeoutOverrideMs : policy.requestTimeoutMs;
+        require(response["timeout_ms"] == expectedTimeout, "request timeout override lost");
+        const auto scripted = sequence.value(i, sequence.last());
+        if (scripted.truncated) {
+            require(response["response_bytes"] == 8 && response["response"].toString().toUtf8() == scripted.body.left(8),
+                    "partial response lost after abort/disconnect");
+            require(response["server_request_id"] == "fixture-request", "server request ID lost");
+        }
         if (i == expectedAttempts - 1) require(finalPrefix == prefix, "audit prefix not attached to final attempt");
     }
     for (const auto& file : QDir(logs.path()).entryList(QDir::Files))
@@ -172,8 +199,8 @@ static void testCancellation(bool duringRequest)
         transport.send(server.request(), {{"model", "new-run"}}, "index_1", "002_new", logs.path(),
             [&](bool ok, const QString&, const QString&) { if (ok) ++newCallbacks; });
     };
-    QObject::connect(&transport, &LlmTransport::logMessage, &transport, [&](const QString&) {
-        if (!duringRequest) restart();
+    QObject::connect(&transport, &LlmTransport::logMessage, &transport, [&](const QString& message) {
+        if (!duringRequest && message.contains("Повтор")) restart();
     });
     transport.send(server.request(), {{"model", "old-run"}}, "index_1", "001_old", logs.path(),
         [&](bool, const QString&, const QString&) { ++oldCallbacks; });
@@ -229,6 +256,7 @@ int main(int argc, char** argv)
     try {
         const auto now = QDateTime::fromString("2026-11-13T12:00:00Z", Qt::ISODate);
         const LlmTransport::RetryPolicy defaults;
+        require(defaults.requestTimeoutMs == 900000, "default request timeout is not 15 minutes");
         require(LlmTransport::retryDelayMs(defaults, 1, {}, now) == 60000, "first delay changed");
         require(LlmTransport::retryDelayMs(defaults, 2, {}, now) == 120000, "second delay changed");
         require(LlmTransport::retryDelayMs(defaults, 3, {}, now) == 180000, "third delay changed");
@@ -251,8 +279,12 @@ int main(int argc, char** argv)
         testCase({Response{429, "2"}}, 1, false);
         testCase({Response{429, "1"}, Response{}}, 2, true, fastPolicy(), 1000);
         auto timeoutPolicy = fastPolicy(); timeoutPolicy.requestTimeoutMs = 70;
-        testCase({Response{200, {}, {}, true}, Response{}}, 2, true, timeoutPolicy);
-        testCase({Response{200, {}, {}, true}}, 4, false, timeoutPolicy);
+        testCase({Response{200, {}, {}, true}, Response{}}, 1, false, timeoutPolicy, 0, 0, true);
+        testCase({Response{200, {}, successBody(), true, 0, true}}, 1, false, timeoutPolicy, 0, 0, true);
+        testCase({Response{200, {}, successBody(), false, 0, true}}, 1, false, fastPolicy(), 0, 0, true);
+        testCase({Response{500, {}, successBody(), false, 0, true}}, 1, false, fastPolicy(), 0, 0, true);
+        testCase({Response{200, {}, {}, false, 0, false, true}}, 1, false, fastPolicy(), 0, 0, true);
+        testCase({Response{200, {}, successBody(), false, 120}}, 1, true, timeoutPolicy, 100, 500);
         testCancellation(false);
         testCancellation(true);
         testCacheDeployment();

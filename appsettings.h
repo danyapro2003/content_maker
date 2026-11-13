@@ -25,6 +25,7 @@ public:
     QString llmBaseUrl = "https://api.openai.com/v1";
     QString llmApiKey;
     QString llmModel = "gpt-4o-mini";
+    int llmTimeoutMinutes = 15;
 
     // Какие субтитры отправлять в LLM
     SubsForLlm subsForLlm = SubsForLlm::Both;

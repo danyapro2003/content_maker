@@ -106,7 +106,7 @@ void LlmClient::sendChat(const QJsonArray& messages,
         [this, callback](bool ok, const QString& content, const QString& finalPrefix) {
         m_lastRequestPrefix = finalPrefix;
         callback(ok, content);
-    });
+    }, qBound(1, s.llmTimeoutMinutes, 60) * 60000);
 }
 
 // ---------- вход ----------

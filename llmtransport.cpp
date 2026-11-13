@@ -16,6 +16,7 @@ struct LlmTransport::Pending {
     QString stage, prefix, logDirectory;
     Completion completion;
     int attempts = 0;
+    int timeoutMs = 0;
     bool cancelled = false;
 };
 
@@ -98,7 +99,7 @@ qint64 LlmTransport::retryDelayMs(const RetryPolicy& policy, int completedAttemp
 
 void LlmTransport::send(const QNetworkRequest& request, const QJsonObject& body,
                        const QString& stage, const QString& prefix, const QString& logDirectory,
-                       Completion completion)
+                       Completion completion, int timeoutMs)
 {
     cancel();
     auto pending = std::make_shared<Pending>();
@@ -109,6 +110,7 @@ void LlmTransport::send(const QNetworkRequest& request, const QJsonObject& body,
     pending->prefix = prefix;
     pending->logDirectory = logDirectory;
     pending->completion = std::move(completion);
+    pending->timeoutMs = timeoutMs > 0 ? timeoutMs : m_policy.requestTimeoutMs;
     m_pending = pending;
     attempt(pending);
 }
@@ -122,6 +124,7 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
     saveJson(pending->logDirectory, prefix + ".request.json", {
         {"stage", pending->stage}, {"request_id", pending->prefix}, {"attempt", number},
         {"max_attempts", m_policy.maxAttempts},
+        {"timeout_ms", pending->timeoutMs},
         {"started_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
         {"url", pending->request.url().toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery)},
         {"body", pending->body}});
@@ -130,21 +133,41 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
     elapsed.start();
     auto* reply = m_network.post(pending->request, pending->payload);
     m_reply = reply;
+    const auto received = std::make_shared<QByteArray>();
+    connect(reply, &QNetworkReply::readyRead, reply, [reply, received]() { received->append(reply->readAll()); });
     auto* deadline = new QTimer(reply);
     deadline->setSingleShot(true);
     connect(deadline, &QTimer::timeout, reply, [reply]() {
         reply->setProperty("llmTimedOut", true);
         reply->abort();
     });
-    deadline->start(m_policy.requestTimeoutMs);
-    connect(reply, &QNetworkReply::finished, this, [this, pending, reply, deadline, elapsed, number, prefix]() {
+    deadline->start(pending->timeoutMs);
+    auto* progress = new QTimer(reply);
+    progress->setInterval(m_policy.progressIntervalMs);
+    connect(progress, &QTimer::timeout, this, [this, pending, reply, received, elapsed]() {
+        const bool headers = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid();
+        emit logMessage(QString("LLM [%1] %2: ожидание ответа %3 с из %4 с; HTTP-заголовки %5, получено %6 байт.")
+            .arg(pending->stage, pending->body["model"].toString())
+            .arg(elapsed.elapsed() / 1000).arg(pending->timeoutMs / 1000)
+            .arg(headers ? "получены" : "ещё не получены").arg(received->size()));
+    });
+    progress->start();
+    connect(reply, &QNetworkReply::finished, this, [this, pending, reply, deadline, progress, received, elapsed, number, prefix]() {
         deadline->stop();
+        progress->stop();
         const bool timedOut = reply->property("llmTimedOut").toBool();
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const auto networkError = reply->error();
-        const QByteArray raw = reply->isOpen() ? reply->readAll() : QByteArray();
+        if (reply->isOpen()) received->append(reply->readAll());
+        const QByteArray raw = *received;
         const auto document = QJsonDocument::fromJson(raw);
         const auto retryAfter = reply->rawHeader("Retry-After");
+        const bool transportError = networkError != QNetworkReply::NoError
+            && (networkError < QNetworkReply::ContentAccessDenied
+                || networkError == QNetworkReply::ProtocolFailure || networkError == QNetworkReply::ProtocolUnknownError);
+        // A missing/truncated response does not establish that the server rejected the POST.
+        // Replaying it can create a second billable generation.
+        const bool outcomeUnknown = timedOut || status == 0 || transportError;
         QString content = document.object().value("choices").toArray().first().toObject()
             .value("message").toObject().value("content").toString();
         const bool ok = !pending->cancelled && !timedOut && networkError == QNetworkReply::NoError
@@ -157,19 +180,21 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
                 reason = "LLM вернул пустой или некорректный ответ";
             else reason = QString("HTTP %1: %2").arg(status).arg(reply->errorString());
             content = reason + " " + QString::fromUtf8(raw).left(500);
+            if (outcomeUnknown && !pending->cancelled)
+                content += "\nРезультат запроса на сервере неизвестен. Автоповтор отключён: "
+                           "сервер мог выполнить генерацию и учесть расход.";
         }
-        const bool temporary = timedOut || status == 408 || status == 429 || status == 500
-            || status == 502 || status == 503 || status == 504
-            || (status == 0 && (networkError == QNetworkReply::TimeoutError
-                || networkError == QNetworkReply::RemoteHostClosedError
-                || networkError == QNetworkReply::TemporaryNetworkFailureError
-                || networkError == QNetworkReply::ConnectionRefusedError));
-        const qint64 delay = !ok && temporary && !pending->cancelled
+        const bool temporary = status == 408 || status == 429 || status == 500
+            || status == 502 || status == 503 || status == 504;
+        const qint64 delay = !ok && temporary && !outcomeUnknown && !pending->cancelled
             ? retryDelayMs(m_policy, number, retryAfter, QDateTime::currentDateTimeUtc()) : -1;
         saveJson(pending->logDirectory, prefix + ".response.json", {
             {"ok", ok}, {"stage", pending->stage}, {"request_id", pending->prefix}, {"attempt", number},
             {"http_status", status}, {"elapsed_ms", double(elapsed.elapsed())},
-            {"network_error", reply->errorString()}, {"timed_out", timedOut}, {"cancelled", pending->cancelled},
+            {"network_error", networkError == QNetworkReply::NoError ? QString() : reply->errorString()},
+            {"timed_out", timedOut}, {"cancelled", pending->cancelled}, {"outcome_unknown", outcomeUnknown},
+            {"response_bytes", raw.size()}, {"timeout_ms", pending->timeoutMs},
+            {"server_request_id", QString::fromUtf8(reply->rawHeader("x-request-id"))},
             {"retry_after", QString::fromLatin1(retryAfter)}, {"will_retry", delay >= 0},
             {"retry_delay_ms", double(delay)}, {"error", reason},
             {"response", document.isObject() ? QJsonValue(document.object()) : QJsonValue(QString::fromUtf8(raw))}});
@@ -194,4 +219,7 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
         m_pending.reset();
         pending->completion(ok, content, prefix);
     });
+    emit logMessage(QString("LLM [%1]: %2, попытка %3/%4, ожидание до %5 с.")
+        .arg(pending->stage, pending->body["model"].toString())
+        .arg(number).arg(m_policy.maxAttempts).arg(pending->timeoutMs / 1000));
 }
