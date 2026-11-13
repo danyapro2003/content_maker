@@ -4,7 +4,7 @@
 #include <QObject>
 #include <QJsonArray>
 #include <QJsonObject>
-#include <QNetworkAccessManager>
+#include "llmtransport.h"
 #include "metadataparser.h"
 #include "stories3runner.h"
 
@@ -158,7 +158,7 @@ private:
     static QString secToTimecode(double sec);
     static QStringList chunkSrt(const QString& text, int maxChars);
 
-    QNetworkAccessManager* m_nam;
+    LlmTransport m_transport;
     QString m_runLogDirectory;
     QString m_lastRequestPrefix;
     int m_requestNumber = 0;

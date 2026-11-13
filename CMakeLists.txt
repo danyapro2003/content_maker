@@ -28,6 +28,7 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         metadataparser.h metadataparser.cpp
         appsettings.h appsettings.cpp
         llmclient.h llmclient.cpp
+        llmtransport.h llmtransport.cpp
         storynarrative.h storynarrative.cpp
         whisperrunner.h whisperrunner.cpp
         cliprenderer.h cliprenderer.cpp
@@ -60,10 +61,13 @@ endif()
 
 target_link_libraries(content_clipper PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network)
 
-# python-скрипты (диаризация и пр.) кладём рядом с exe
+# Preserve timestamps of unchanged scripts: they are dependencies of the ASR cache.
 add_custom_command(TARGET content_clipper POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_SOURCE_DIR}/scripts $<TARGET_FILE_DIR:content_clipper>/scripts)
+    COMMAND ${CMAKE_COMMAND}
+        "-DCLIPPER_SCRIPT_SOURCE=${CMAKE_SOURCE_DIR}/scripts"
+        "-DCLIPPER_SCRIPT_DESTINATION=$<TARGET_FILE_DIR:content_clipper>/scripts"
+        -P "${CMAKE_SOURCE_DIR}/cmake/DeployScripts.cmake"
+    VERBATIM)
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
 # If you are developing for iOS or macOS you should consider setting an
@@ -95,7 +99,7 @@ if(CONTENT_CLIPPER_BUILD_TESTS)
     enable_testing()
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_executable(test_stories3 tests/test_stories3.cpp
-        appsettings.cpp llmclient.cpp storynarrative.cpp s3cache.cpp stories3runner.cpp stories3pipeline.cpp
+        appsettings.cpp llmclient.cpp llmtransport.cpp storynarrative.cpp s3cache.cpp stories3runner.cpp stories3pipeline.cpp
         pipelinemanager.cpp mediaextractor.cpp metadataparser.cpp whisperrunner.cpp
         cliprenderer.cpp srtutils.cpp subtitlecomposer.cpp transcriptpacker.cpp diarizerunner.cpp)
     target_include_directories(test_stories3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -104,5 +108,12 @@ if(CONTENT_CLIPPER_BUILD_TESTS)
     target_link_libraries(test_stories3 PRIVATE Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::Network)
     add_test(NAME stories3 COMMAND test_stories3 ${Python3_EXECUTABLE})
     add_test(NAME transcript_v3 COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_transcript_v3.py)
-    set_tests_properties(stories3 transcript_v3 PROPERTIES TIMEOUT 60)
+    add_executable(test_llmtransport tests/test_llmtransport.cpp llmtransport.cpp s3cache.cpp)
+    target_include_directories(test_llmtransport PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    set_target_properties(test_llmtransport PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
+    target_compile_definitions(test_llmtransport PRIVATE
+        CLIPPER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}" CLIPPER_CMAKE="${CMAKE_COMMAND}")
+    target_link_libraries(test_llmtransport PRIVATE Qt${QT_VERSION_MAJOR}::Network)
+    add_test(NAME llmtransport COMMAND test_llmtransport)
+    set_tests_properties(stories3 transcript_v3 llmtransport PROPERTIES TIMEOUT 60)
 endif()

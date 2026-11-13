@@ -4,20 +4,18 @@
 #include "llmclient.h"
 #include "appsettings.h"
 #include <QNetworkRequest>
-#include <QNetworkReply>
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QFile>
 #include <QDir>
 #include <QSaveFile>
-#include <QDateTime>
 #include <QSet>
 #include <algorithm>
 #include <cmath>
 
 LlmClient::LlmClient()
 {
-    m_nam = new QNetworkAccessManager(this);
+    connect(&m_transport, &LlmTransport::logMessage, this, &LlmClient::logMessage);
 }
 
 // ---------- утилиты ----------
@@ -64,6 +62,7 @@ QStringList LlmClient::chunkSrt(const QString& text, int maxChars)
 
 void LlmClient::setRunLogDirectory(const QString& directory)
 {
+    m_transport.cancel();
     m_runLogDirectory = directory;
     m_requestNumber = 0;
     m_lastRequestPrefix.clear();
@@ -98,51 +97,15 @@ void LlmClient::sendChat(const QJsonArray& messages,
 
     const QString prefix = QString("%1_%2").arg(++m_requestNumber, 3, 10, QChar('0')).arg(stage);
     m_lastRequestPrefix = prefix;
-    const QString logDir = m_runLogDirectory;
-    const qint64 started = QDateTime::currentMSecsSinceEpoch();
-    writeRunArtifact(prefix + ".request.json", {{"stage", stage},
-        {"started_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
-        {"url", QUrl(url).toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery)}, {"body", body}});
-
     QNetworkRequest req{QUrl(url)};
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     if (!s.llmApiKey.isEmpty())
         req.setRawHeader("Authorization", "Bearer " + s.llmApiKey.toUtf8());
 
-    QNetworkReply* reply = m_nam->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-
-    connect(reply, &QNetworkReply::finished, this, [reply, callback, prefix, logDir, started]() {
-        bool ok = (reply->error() == QNetworkReply::NoError);
-        const QByteArray raw = reply->readAll();
-        const QJsonDocument document = QJsonDocument::fromJson(raw);
-        QString content;
-        if (ok) {
-            content = document.object()
-                          .value("choices").toArray().first().toObject()
-                          .value("message").toObject()
-                          .value("content").toString();
-            if (content.isEmpty())
-                ok = false;
-        }
-        if (!ok && content.isEmpty())
-            content = QString("HTTP/LLM ошибка: %1 %2")
-                          .arg(reply->errorString())
-                          .arg(QString::fromUtf8(raw).left(500));
-        if (!logDir.isEmpty()) {
-            const QJsonObject response{{"ok", ok},
-                {"http_status", reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()},
-                {"elapsed_ms", double(QDateTime::currentMSecsSinceEpoch() - started)},
-                {"network_error", reply->errorString()},
-                {"response", document.isObject() ? QJsonValue(document.object()) : QJsonValue(QString::fromUtf8(raw))}};
-            QSaveFile json(logDir + "/" + prefix + ".response.json");
-            if (json.open(QIODevice::WriteOnly)) {
-                json.write(QJsonDocument(response).toJson(QJsonDocument::Indented)); json.commit();
-            }
-            QSaveFile text(logDir + "/" + prefix + ".response.txt");
-            if (text.open(QIODevice::WriteOnly)) { text.write(content.toUtf8()); text.commit(); }
-        }
+    m_transport.send(req, body, stage, prefix, m_runLogDirectory,
+        [this, callback](bool ok, const QString& content, const QString& finalPrefix) {
+        m_lastRequestPrefix = finalPrefix;
         callback(ok, content);
-        reply->deleteLater();
     });
 }
 
