@@ -4,6 +4,7 @@
 #include "s3cache.h"
 #include "subtitlecomposer.h"
 #include "appsettings.h"
+#include "storytimeline.h"
 #include <QFile>
 #include <QFileInfo>
 #include <QDir>
@@ -806,37 +807,20 @@ void PipelineManager::onStoriesFound(const QList<StoryClip>& stories, const QJso
 
     m_stories.clear();
     for (StoryClip story : stories) {
-        const auto sourceSegments = story.segments;
+        if (m_mode == Mode::Stories3) {
+            if (story.timelineHash.isEmpty() || story.timelineHash != StoryTimeline::hash(story)
+                || story.totalSec() < s.s3MinClipSec - .001 || story.totalSec() > s.s3MaxClipSec + .001) {
+                onErrorOccurred("V3: монтаж изменился после аудита или не прошёл компиляцию временной шкалы."); return;
+            }
+            m_stories.append(story); continue;
+        }
         // снаппинг каждой склейки к границам слов/реплик
         for (int si = 0; si < story.segments.size(); ++si) {
             StorySegment& seg = story.segments[si];
-            if (m_mode == Mode::Stories3) {
-                // Phrase references already describe complete editorial intervals.
-                // Pad within source gaps, without crossing another selected interval.
-                double previous = 0.0, next = currentInfo.durationSec;
-                for (int other = 0; other < sourceSegments.size(); ++other) {
-                    if (other == si) continue;
-                    const auto& candidate = sourceSegments[other];
-                    if (candidate.endSec <= seg.startSec) previous = qMax(previous, candidate.endSec);
-                    if (candidate.startSec >= seg.endSec) next = qMin(next, candidate.startSec);
-                }
-                seg.startSec = qMax(0.0, seg.startSec - qMin(padStart, qMax(0.0, seg.startSec - previous) / 2));
-                seg.endSec = qMin(currentInfo.durationSec,
-                    seg.endSec + qMin(padEnd, qMax(0.0, next - seg.endSec) / 2));
-                continue;
-            }
             auto sn = SrtUtils::snapSegment(seg.startSec, seg.endSec, m_cues,
                                             padStart, padEnd, currentInfo.durationSec);
             seg.startSec = sn.first;
             seg.endSec = sn.second;
-        }
-        if (m_mode == Mode::Stories3) {
-            if (story.totalSec() < s.s3MinClipSec || story.totalSec() > s.s3MaxClipSec) {
-                emit logMessage("Пересказ 3.0: итоговая длина после паддинга вне заданных границ.");
-                continue;
-            }
-            m_stories.append(story);
-            continue;
         }
         // хронологический порядок + слияние близких склеек (метаданные — от первой)
         std::sort(story.segments.begin(), story.segments.end(),

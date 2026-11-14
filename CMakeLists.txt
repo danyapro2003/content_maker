@@ -29,7 +29,7 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         appsettings.h appsettings.cpp
         llmclient.h llmclient.cpp
         llmtransport.h llmtransport.cpp
-        storynarrative.h storynarrative.cpp storytypes.h storyprotocol.cpp storyprotocol.h storyrunstore.cpp storyrunstore.h
+        storynarrative.h storynarrative.cpp storytypes.h storyprotocol.cpp storyprotocol.h storyrunstore.cpp storyrunstore.h storytimeline.cpp storytimeline.h
         eventindex.cpp
         whisperrunner.h whisperrunner.cpp
         cliprenderer.h cliprenderer.cpp
@@ -99,8 +99,8 @@ option(CONTENT_CLIPPER_BUILD_TESTS "Build V3 regression tests" OFF)
 if(CONTENT_CLIPPER_BUILD_TESTS)
     enable_testing()
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
-    add_executable(test_stories3 tests/test_stories3.cpp tests/test_eventindex.cpp tests/test_storyprotocol.cpp tests/test_storyrunstore.cpp
-        appsettings.cpp llmclient.cpp llmtransport.cpp storynarrative.cpp storytypes.h storyprotocol.cpp storyprotocol.h storyrunstore.cpp storyrunstore.h eventindex.cpp s3cache.cpp stories3runner.cpp stories3pipeline.cpp
+    add_executable(test_stories3 tests/test_stories3.cpp tests/test_eventindex.cpp tests/test_storyprotocol.cpp tests/test_storyrunstore.cpp tests/test_storytimeline.cpp tests/replay_v3_run.cpp
+        appsettings.cpp llmclient.cpp llmtransport.cpp storynarrative.cpp storytypes.h storyprotocol.cpp storyprotocol.h storyrunstore.cpp storyrunstore.h storytimeline.cpp storytimeline.h eventindex.cpp s3cache.cpp stories3runner.cpp stories3pipeline.cpp
         pipelinemanager.cpp mediaextractor.cpp metadataparser.cpp whisperrunner.cpp
         cliprenderer.cpp srtutils.cpp subtitlecomposer.cpp transcriptpacker.cpp diarizerunner.cpp)
     target_include_directories(test_stories3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

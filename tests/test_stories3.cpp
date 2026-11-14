@@ -22,6 +22,8 @@
 void testEventIndex();
 void testStoryProtocol();
 void testStoryRunStore();
+void testStoryTimeline();
+void replayV3Run(const QString&, const QString&);
 void replayEventIndex(const QString& directory, const QString& packedPath);
 
 static void require(bool condition, const char* message)
@@ -58,6 +60,8 @@ static QJsonArray storyJson(const QString& label, int branch = 1)
         {"opening_mode", "natural"}, {"hook_reason", "intrigue"}, {"story_summary", "Goal, struggle, outcome."}, {"score", 90}, {"caption", "caption"},
         {"segments", segments}}};
 }
+
+static int idsForMissing(int branch) { return branch == 1 ? 5 : 6; }
 
 class MockLlm {
 public:
@@ -164,7 +168,7 @@ public:
                             auto story = stories[0].toObject(); auto segments = story["segments"].toArray();
                             auto broken = segments[1].toObject();
                             if (invalidEdits) broken["quote"] = "INVENTED_QUOTE";
-                            if (omitRequired) broken["event_ids"] = QJsonArray{};
+                            if (omitRequired) { broken["start_phrase"] = idsForMissing(branch); broken["end_phrase"] = idsForMissing(branch); }
                             segments[1] = broken; story["segments"] = segments; stories[0] = story;
                         }
                         content = QString::fromUtf8(QJsonDocument(stories).toJson());
@@ -297,7 +301,7 @@ static void runTests(const QString& python)
     bool found = false;
     QObject::connect(&client, &LlmClient::storiesFound, &agentLoop,
         [&](const QList<StoryClip>& result, const QJsonArray& raw) {
-            found = result.size() == 2 && result.first().totalSec() == 65
+            found = result.size() == 2 && result.first().totalSec() >= 65 && result.first().totalSec() < 70
                 && !result.first().narrativePlan.isEmpty() && raw.size() == 2
                 && mock.calls == 8 && mock.reviews == 2 && mock.fidelities == 2 && mock.indexes == 1;
             agentLoop.quit();
@@ -381,6 +385,7 @@ static void runTests(const QString& python)
     testEventIndex();
     testStoryProtocol();
     testStoryRunStore();
+    testStoryTimeline();
     QString auditError;
     require(!StoryNarrative::acceptAudit({{"action", "audit"}, {"pass", true},
                 {"understood_story", "story"}, {"issues", QJsonArray{QJsonObject{{"block", 1}, {"kind", "gap"}, {"problem", "gap"}}}}}, 2, auditError),
@@ -552,6 +557,10 @@ int main(int argc, char** argv)
             require(argc == 4, "--replay-events log-directory packed-transcript.md");
             replayEventIndex(app.arguments()[2], app.arguments()[3]);
             return 0;
+        }
+        if (app.arguments().contains("--replay-v3-run")) {
+            require(argc == 4, "--replay-v3-run log-directory packed-transcript.md");
+            replayV3Run(app.arguments()[2], app.arguments()[3]); return 0;
         }
         if (app.arguments().contains("--compose")) {
             require(argc == 4, "--compose input.srt output.ass");

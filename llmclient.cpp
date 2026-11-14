@@ -5,6 +5,7 @@
 #include "appsettings.h"
 #include "storyprotocol.h"
 #include "s3cache.h"
+#include "storytimeline.h"
 #include <QTimer>
 #include <QFileInfo>
 #include <QNetworkRequest>
@@ -417,12 +418,14 @@ QJsonArray LlmClient::serializeStories(const QList<StoryClip>& stories)
         QJsonArray segments;
         for (const auto& seg : story.segments) {
             segments.append(QJsonObject{{"start_time", seg.startSec}, {"end_time", seg.endSec},
+                {"block_id", seg.blockId}, {"role", seg.beat},
                 {"start_phrase", seg.startPhrase}, {"end_phrase", seg.endPhrase},
                 {"event_ids", QJsonArray::fromStringList(seg.eventIds)},
                 {"beat", seg.beat}, {"quote", seg.quote}, {"reason", seg.reason},
                 {"event", seg.event}, {"connection", seg.connection}});
         }
         array.append(QJsonObject{{"title", story.title}, {"description", story.description},
+            {"protocol_version", story.protocolVersion}, {"branch_id", story.branchId}, {"timeline_hash", story.timelineHash},
             {"caption", story.caption}, {"emotion", story.emotion}, {"score", story.score},
             {"story_summary", story.storySummary}, {"narrative_plan", story.narrativePlan},
             {"opening_mode", story.openingMode}, {"hook_reason", story.hookReason},
@@ -521,9 +524,8 @@ static QJsonObject storyObject(QString content)
 
 static QString storyEditInstructions(const AppSettings& s)
 {
-    // Leave space for the small playback padding applied after validation.
-    const double budget = qMax(s.s3MinClipSec, s.s3MaxClipSec - 2 * s.editPaddingMs / 1000.0 * s.s3MaxSegments);
-    return StoryNarrative::editPrompt(s.s3MinClipSec, budget, s.s3MaxSegments, s.s3MaxSegmentSec)
+    return StoryNarrative::editPrompt(s.s3MinClipSec, s.s3MaxClipSec, s.s3MaxSegments, s.s3MaxSegmentSec)
+        + QString("\nКод добавляет до %1 с тишины с каждой стороны блока; оставь небольшой запас у максимума.").arg(s.editPaddingMs / 1000.0)
         + QString("\nОхват исходника: %1. score — оценка 0–100 за понятность, подготовку финала "
                   "и сохранение смысла; установленный порог %2. Оценка не заменяет независимые проверки.")
             .arg(s.s3MaxSpanSec > 0 ? QString::number(s.s3MaxSpanSec) + " с" : "весь фильм")
@@ -587,10 +589,11 @@ bool LlmClient::importEventMapV3(const QString& logDirectory, QString& error)
     };
     const auto run = QJsonDocument::fromJson(read(logDirectory + "/run.json")).object();
     QDir sourceDir(logDirectory); sourceDir.cdUp(); sourceDir.cdUp();
-    const auto packed = QString::fromUtf8(read(sourceDir.filePath("temp/s3_packed.md")));
+    const auto importedPhrases = Stories3Runner::parsePacked(sourceDir.filePath("temp/s3_packed.md"));
     if (QFileInfo(run["source"].toString()).canonicalFilePath().isEmpty()
         || QFileInfo(run["source"].toString()).canonicalFilePath() != QFileInfo(m_info.filePath).canonicalFilePath()
-        || packed.trimmed() != m_packedText.trimmed() || run["model"] != AppSettings::instance().llmModel) {
+        || StoryNarrative::transcript(importedPhrases) != StoryNarrative::transcript(m_s3Phrases)
+        || run["model"] != AppSettings::instance().llmModel) {
         error = "IMPORT_MISMATCH: источник, транскрипт или модель старого запуска не совпадают. Импорт отменён."; return false;
     }
     const auto events = QJsonDocument::fromJson(read(logDirectory + "/event_map.json")).object()["events"].toArray();
@@ -905,7 +908,18 @@ void LlmClient::runStoryTurnV3()
             const auto decoded = StoryProtocol::parseEdit(content, m_s3Phrases);
             const QList<StoryClip> parsed = decoded.ok() ? QList<StoryClip>{decoded.value} : QList<StoryClip>{};
             notes = decoded.messages();
-            auto valid = decoded.ok() ? validateStoriesV3(parsed, m_s3Phrases, notes) : QList<StoryClip>{};
+            StoryTimeline::Options options;
+            options.sourceDuration = m_info.durationSec; options.minSec = s.s3MinClipSec; options.maxSec = s.s3MaxClipSec;
+            options.maxSegments = s.s3MaxSegments; options.minScore = s.s3MinScore; options.maxSpanSec = s.s3MaxSpanSec;
+            options.paddingSec = s.editPaddingMs / 1000.0; options.overlapToleranceSec = s.s3TimestampOverlapMs / 1000.0;
+            options.checkLegacyQuotes = s.s3QuoteCheck;
+            const auto compiled = decoded.ok() ? StoryTimeline::compile(decoded.value, m_s3Phrases, m_story3Events, m_story3Plan, options)
+                                               : StoryProtocol::ParseResult<StoryTimeline::CompiledStory>{};
+            if (decoded.ok()) notes.append(compiled.messages());
+            auto valid = decoded.ok() && compiled.ok() ? QList<StoryClip>{compiled.value.story} : QList<StoryClip>{};
+            if (decoded.ok()) writeRunArtifact(m_lastRequestPrefix + ".timeline.json", {{"accepted", compiled.ok()},
+                {"issues", compiled.errors()}, {"normalizations", compiled.value.normalizations},
+                {"stories", serializeStories({compiled.value.story})}});
             if (!valid.isEmpty()) {
                 for (const auto& previous : m_story3Results) {
                     double overlap = 0;
