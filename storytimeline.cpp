@@ -131,14 +131,26 @@ StoryProtocol::ParseResult<CompiledStory> compile(const StoryClip& draft, const 
     }
     if (!plan.isEmpty()) {
         bool validEnding = endingIndex >= 0;
+        QString invalidTail;
+        QJsonObject endingEvidence{{"ending_event", plan["ending_event"]}};
         for (int i = endingIndex + 1; validEnding && i < clip.segments.size(); ++i) {
             const auto& tail = clip.segments[i]; const auto& previous = clip.segments[i - 1];
             validEnding = (tail.beat.compare("reaction", Qt::CaseInsensitive) == 0 || tail.beat.compare("context", Qt::CaseInsensitive) == 0)
                 && tail.startSec >= previous.endSec - .001 && tail.startSec - previous.endSec <= 8
                 && positions.value(previous.endPhrase, -2) + 1 == positions.value(tail.startPhrase, -1);
+            if (!validEnding) {
+                invalidTail = tail.blockId;
+                const int next = positions.value(previous.endPhrase, -2) + 1;
+                endingEvidence = {{"ending_event", plan["ending_event"]}, {"previous_block", previous.blockId},
+                    {"previous_end_phrase", previous.endPhrase}, {"tail_start_phrase", tail.startPhrase},
+                    {"tail_role", tail.beat}, {"gap_sec", tail.startSec - previous.endSec}, {"max_gap_sec", 8},
+                    {"next_source_phrase", next >= 0 && next < phrases.size() ? phrases[next].id : -1},
+                    {"repair_options", "Убери хвост после финала или включи пропущенные соседние реплики в завершение; не добавляй новый эпизод."}};
+            }
         }
-        if (!validEnding) fail("MISSING_ENDING", {}, "ending_event", plan["ending_event"],
-            "финальное событие в завершающем эпизоде", "После финала возможна только соседняя подготовленная реакция");
+        if (!validEnding) fail("MISSING_ENDING", invalidTail, "ending_event", plan["ending_event"],
+            "финальное событие в последнем блоке или непрерывный соседний хвост reaction/context с паузой <=8 с",
+            "После финала возможна только соседняя подготовленная реакция без пропуска исходных фраз", endingEvidence);
     }
     const double duration = clip.totalSec();
     QJsonArray lengths;

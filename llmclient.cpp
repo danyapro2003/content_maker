@@ -1033,7 +1033,6 @@ void LlmClient::runStoryTurnV3()
                 m_story3Messages.append(QJsonObject{{"role", "user"}, {"content", "STALE_DRAFT: добавь base_draft_hash: " + m_story3BaseDraftHash}});
                 runStoryTurnV3(); return;
             }
-            const QList<StoryClip> parsed = decoded.ok() ? QList<StoryClip>{decoded.value} : QList<StoryClip>{};
             notes = decoded.messages();
             StoryTimeline::Options options;
             options.sourceDuration = m_info.durationSec; options.minSec = s.s3MinClipSec; options.maxSec = s.s3MaxClipSec;
@@ -1070,8 +1069,11 @@ void LlmClient::runStoryTurnV3()
                     }
                 }
             }
+            QJsonArray validationIssues = decoded.errors();
+            for (const auto& issue : compiled.errors()) validationIssues.append(issue);
             writeRunArtifact(m_lastRequestPrefix + ".validation.json", {{"accepted", !valid.isEmpty()},
-                {"notes", QJsonArray::fromStringList(notes)}, {"issues", decoded.errors()}, {"resolved_stories", serializeStories(parsed)}});
+                {"notes", QJsonArray::fromStringList(notes)}, {"issues", validationIssues},
+                {"resolved_stories", serializeStories(decoded.ok() ? QList<StoryClip>{compiled.value.story} : QList<StoryClip>{})}});
             if (!valid.isEmpty()) {
                 if (m_story3SeenTimelines.contains(valid.first().timelineHash)) {
                     rejectStoryV3("UNCHANGED_MONTAGE: предложен уже проверенный монтаж; повторная оценка не оплачивается."); return;
@@ -1083,9 +1085,7 @@ void LlmClient::runStoryTurnV3()
                 if (issue.code == "UNKNOWN_PHRASE" || issue.code == "INVALID_ENDPOINT" || issue.code == "REVERSED_RANGE") technical = true;
             if (technical) {
                 m_story3Draft = {decoded.ok() ? compiled.value.story : decoded.value};
-                QJsonArray issues = decoded.errors();
-                for (const auto& issue : compiled.errors()) issues.append(issue);
-                const QJsonObject report{{"kind", "technical_error"}, {"issues", issues}, {"notes", QJsonArray::fromStringList(notes)}};
+                const QJsonObject report{{"kind", "technical_error"}, {"issues", validationIssues}, {"notes", QJsonArray::fromStringList(notes)}};
                 saveStoryStateV3("technical_error", report);
                 repairStoryV3(report); return;
             }
