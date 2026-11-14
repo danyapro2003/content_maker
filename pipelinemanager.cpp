@@ -15,7 +15,31 @@
 #include <QPainter>
 #include <QDateTime>
 #include <QUuid>
+#include <QTimer>
 #include <algorithm>
+
+QJsonObject FileRunResult::json() const
+{
+    return {{"source", source}, {"status", status}, {"error", error}, {"log_directory", logDirectory},
+        {"considered_stories", considered}, {"accepted_stories", accepted}, {"rejected_stories", rejected},
+        {"rendered_stories", renderedStories}, {"expected_videos", expectedVideos},
+        {"created_videos", outputs.size()}, {"outputs", QJsonArray::fromStringList(outputs)}};
+}
+QStringList QueueRunSummary::outputs() const
+{
+    QStringList result; for (const auto& file : files) result.append(file.outputs); return result;
+}
+QString QueueRunSummary::text() const
+{
+    int completed = 0, partial = 0, failed = 0, stories = 0;
+    for (const auto& file : files) {
+        completed += file.status == "completed"; partial += file.status == "partial";
+        failed += file.status == "failed"; stories += file.renderedStories;
+    }
+    return QString("Очередь завершена: файлов %1, успешно %2, частично %3, с ошибками %4. "
+                   "Новых историй: %5. Новых видеофайлов: %6.")
+        .arg(files.size()).arg(completed).arg(partial).arg(failed).arg(stories).arg(outputs().size());
+}
 
 PipelineManager::PipelineManager(QObject *parent) : QObject(parent)
 {
@@ -40,6 +64,9 @@ PipelineManager::PipelineManager(QObject *parent) : QObject(parent)
 
     connect(&llm, &LlmClient::highlightsFound, this, &PipelineManager::onHighlightsFound);
     connect(&llm, &LlmClient::storiesFound, this, &PipelineManager::onStoriesFound);
+    connect(&llm, &LlmClient::storySelectionFinished, this, [this](int considered, int accepted, int rejected) {
+        m_fileResult.considered = considered; m_fileResult.accepted = accepted; m_fileResult.rejected = rejected;
+    });
     connect(&llm, &LlmClient::logMessage, this, &PipelineManager::logMessage);
     connect(&llm, &LlmClient::errorOccurred, this, &PipelineManager::onErrorOccurred);
     connect(&llm, &LlmClient::storyFramesRequested, this, &PipelineManager::onStoryFramesRequested);
@@ -69,6 +96,7 @@ PipelineManager::PipelineManager(QObject *parent) : QObject(parent)
 
 void PipelineManager::onErrorOccurred(const QString& errorMessage)
 {
+    if (!m_fileActive) return;
     // сбой извлечения кадров для агента не смертелен: продолжаем без визуала
     if (m_agentFramesPending) {
         m_agentFramesPending = false;
@@ -90,6 +118,9 @@ void PipelineManager::onErrorOccurred(const QString& errorMessage)
 
 void PipelineManager::addFilesToQueue(const QStringList& files)
 {
+    if (files.isEmpty()) return;
+    if (!m_isProcessing) m_queueSummary = {};
+    m_queueSummary.totalFiles += files.size();
     for (const QString& file : files)
         m_fileQueue.enqueue(file);
 
@@ -101,7 +132,8 @@ void PipelineManager::processNext()
 {
     if (m_fileQueue.isEmpty()) {
         m_isProcessing = false;
-        emit logMessage("=== Очередь пуста. Все файлы обработаны! ===");
+        emit logMessage(m_queueSummary.text());
+        emit queueSummaryReady(m_queueSummary);
         emit queueFinished();
         return;
     }
@@ -113,6 +145,9 @@ void PipelineManager::processNext()
 
 void PipelineManager::startPipeline(const QString& path)
 {
+    m_fileActive = true;
+    m_fileResult = {}; m_fileResult.source = path;
+    m_renderedStoryIds.clear();
     currentFilePath = path;
     baseName = QFileInfo(currentFilePath).completeBaseName();
 
@@ -123,6 +158,7 @@ void PipelineManager::startPipeline(const QString& path)
         + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz") + "_"
         + QUuid::createUuid().toString(QUuid::Id128).left(8);
     QDir().mkpath(m_runLogDirectory);
+    m_fileResult.logDirectory = m_runLogDirectory;
     m_runError.clear();
     m_runOutputs.clear();
     llm.setRunLogDirectory(m_runLogDirectory);
@@ -848,8 +884,13 @@ void PipelineManager::onStoriesFound(const QList<StoryClip>& stories, const QJso
 
 void PipelineManager::startRenderTasks()
 {
+    const auto& settings = AppSettings::instance();
+    const int count = m_mode == Mode::Highlights ? m_highlights.size() : m_stories.size();
+    m_fileResult.expectedVideos = count * (int(settings.renderRu) + int(settings.renderEn));
+    if (m_mode != Mode::Stories3) m_fileResult.accepted = count;
     if (m_renderTasks.isEmpty()) {
-        emit logMessage("Нет задач рендера (проверь настройки языков и наличие аудиодорожек).");
+        m_runError = "Нет задач рендера (проверь настройки языков и наличие аудиодорожек).";
+        emit logMessage(m_runError);
         finishCurrentFile();
         return;
     }
@@ -1096,7 +1137,13 @@ void PipelineManager::renderTaskWithSrt(const QString& srtPath)
 
 void PipelineManager::onClipRendered(const QString& outPath)
 {
+    if (!m_fileActive || m_taskIndex < 0 || m_taskIndex >= m_renderTasks.size()) return;
+    if (outPath != m_renderTasks[m_taskIndex].outPath || m_runOutputs.contains(outPath)) return;
+    if (!QFileInfo(outPath).isFile() || QFileInfo(outPath).size() <= 0) {
+        onErrorOccurred("Рендер сообщил об успехе, но файл отсутствует или пуст: " + outPath); return;
+    }
     m_runOutputs.append(outPath);
+    if (m_renderTasks[m_taskIndex].isStory) m_renderedStoryIds.insert(m_renderTasks[m_taskIndex].clipIndex);
     emit logMessage("Клип готов: " + outPath);
     ++m_taskIndex;
     processNextRenderTask();
@@ -1104,12 +1151,23 @@ void PipelineManager::onClipRendered(const QString& outPath)
 
 void PipelineManager::finishCurrentFile()
 {
-    llm.writeRunArtifact("result.json", {{"status", m_runError.isEmpty() ? "completed" : "failed"},
-        {"error", m_runError}, {"outputs", QJsonArray::fromStringList(m_runOutputs)},
-        {"finished_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)}});
+    if (!m_fileActive) return;
+    m_fileActive = false;
+    if (m_runOutputs.isEmpty() && m_runError.isEmpty()) m_runError = "Запуск не создал ни одного видеофайла.";
+    if (m_runOutputs.size() < m_fileResult.expectedVideos && m_runError.isEmpty())
+        m_runError = "Созданы не все запрошенные языковые версии.";
+    m_fileResult.status = m_runOutputs.isEmpty() ? "failed" : (m_runError.isEmpty() ? "completed" : "partial");
+    m_fileResult.error = m_runError; m_fileResult.outputs = m_runOutputs;
+    m_fileResult.renderedStories = m_renderedStoryIds.size();
+    auto result = m_fileResult.json();
+    result["finished_utc"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
+    llm.writeRunArtifact("result.json", result);
+    m_queueSummary.files.append(m_fileResult);
+    emit logMessage(QString("Результат файла: %1. Новых историй: %2, видео: %3. %4")
+        .arg(m_fileResult.status).arg(m_fileResult.renderedStories).arg(m_runOutputs.size()).arg(m_runError));
     if (!m_runError.isEmpty() && m_runOutputs.isEmpty())
         emit logMessage("Текущий прогон не создал новых роликов. Файлы прошлых прогонов остались в папке; "
                         "подробности ошибки и ответы LLM сохранены в logs.");
     m_audioPurpose = AudioPurpose::None;
-    processNext();
+    QTimer::singleShot(0, this, &PipelineManager::processNext);
 }

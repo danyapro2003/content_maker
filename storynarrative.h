@@ -1,5 +1,7 @@
 #pragma once
-#include "llmclient.h"
+#include "storytypes.h"
+#include "stories3runner.h"
+#include <QJsonArray>
 
 // Pure prompt/data helpers. Viewer input deliberately has no source or editorial metadata.
 namespace StoryNarrative {

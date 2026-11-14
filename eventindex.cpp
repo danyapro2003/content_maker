@@ -1,3 +1,4 @@
+#include "llmclient.h"
 #include "storynarrative.h"
 #include <QHash>
 #include <QJsonDocument>

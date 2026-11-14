@@ -20,6 +20,9 @@
 #include <QPushButton>
 #include <QHeaderView>
 #include <QDateTime>
+#include <QStatusBar>
+#include <QDesktopServices>
+#include <QUrl>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -34,6 +37,25 @@ MainWindow::MainWindow(QWidget *parent)
     connect(Manager, &PipelineManager::queueFinished, this, [this]() {
         ui->start_pb->setEnabled(true);
     });
+    auto* openOutputs = new QPushButton("Открыть новые клипы", this);
+    auto* openLogs = new QPushButton("Открыть логи", this);
+    openOutputs->setEnabled(false); openLogs->setEnabled(false);
+    statusBar()->addPermanentWidget(openOutputs);
+    statusBar()->addPermanentWidget(openLogs);
+    connect(openOutputs, &QPushButton::clicked, this, [openOutputs]() {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(openOutputs->property("directory").toString()));
+    });
+    connect(openLogs, &QPushButton::clicked, this, [openLogs]() {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(openLogs->property("directory").toString()));
+    });
+    connect(Manager, &PipelineManager::queueSummaryReady, this,
+        [this, openOutputs, openLogs](const QueueRunSummary& summary) {
+            statusBar()->showMessage(summary.text());
+            openOutputs->setEnabled(!summary.outputs().isEmpty());
+            openLogs->setEnabled(!summary.files.isEmpty());
+            if (!summary.outputs().isEmpty()) openOutputs->setProperty("directory", QFileInfo(summary.outputs().last()).absolutePath());
+            if (!summary.files.isEmpty()) openLogs->setProperty("directory", summary.files.last().logDirectory);
+        });
 
     // таблица клипов
     ui->clips_tw->setColumnCount(6);

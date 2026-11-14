@@ -3,6 +3,7 @@
 
 #include "llmclient.h"
 #include "appsettings.h"
+#include "storyprotocol.h"
 #include <QNetworkRequest>
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -650,6 +651,7 @@ void LlmClient::startNextStoryBranchV3()
     ++m_story3BranchIndex;
     const auto& settings = AppSettings::instance();
     if (m_story3BranchIndex >= m_story3Plans.size()) {
+        emit storySelectionFinished(m_story3Plans.size(), m_story3Results.size(), m_story3Failures.size());
         writeRunArtifact("selection.json", {{"requested_min", settings.minClips},
             {"requested_max", settings.maxClips}, {"accepted", serializeStories(m_story3Results)},
             {"failures", QJsonArray::fromStringList(m_story3Failures)}});
@@ -764,9 +766,10 @@ void LlmClient::runStoryTurnV3()
             }
             notes << error;
         } else {
-            QJsonArray raw;
-            const auto parsed = parseStories(content, raw, true);
-            auto valid = validateStoriesV3(parsed, m_s3Phrases, notes);
+            const auto decoded = StoryProtocol::parseEdit(content, m_s3Phrases);
+            const QList<StoryClip> parsed = decoded.ok() ? QList<StoryClip>{decoded.value} : QList<StoryClip>{};
+            notes = decoded.messages();
+            auto valid = decoded.ok() ? validateStoriesV3(parsed, m_s3Phrases, notes) : QList<StoryClip>{};
             if (!valid.isEmpty()) {
                 for (const auto& previous : m_story3Results) {
                     double overlap = 0;
@@ -779,11 +782,11 @@ void LlmClient::runStoryTurnV3()
                 }
             }
             writeRunArtifact(m_lastRequestPrefix + ".validation.json", {{"accepted", !valid.isEmpty()},
-                {"notes", QJsonArray::fromStringList(notes)}, {"resolved_stories", serializeStories(parsed)}});
+                {"notes", QJsonArray::fromStringList(notes)}, {"issues", decoded.errors()}, {"resolved_stories", serializeStories(parsed)}});
             if (!valid.isEmpty()) { reviewStoryDraftV3(valid); return; }
         }
         if (notes.isEmpty()) notes << "неверная структура ответа";
-        writeRunArtifact(m_lastRequestPrefix + ".validation.json", {{"accepted", false}, {"notes", QJsonArray::fromStringList(notes)}});
+        writeRunArtifact(m_lastRequestPrefix + ".rejection.json", {{"accepted", false}, {"notes", QJsonArray::fromStringList(notes)}});
         if (!m_story3Retried) {
             m_story3Retried = true;
             m_story3Messages.append(QJsonObject{{"role", "user"}, {"content", "Ответ не прошёл проверку:\n" + notes.mid(0, 16).join("\n")

@@ -20,6 +20,7 @@
 #include <stdexcept>
 
 void testEventIndex();
+void testStoryProtocol();
 void replayEventIndex(const QString& directory, const QString& packedPath);
 
 static void require(bool condition, const char* message)
@@ -349,6 +350,7 @@ static void runTests(const QString& python)
     for (const auto& window : windows) for (const auto& phrase : window) seen.insert(phrase.id);
     require(windows.size() > 1 && seen.size() == phrases.size(), "event chunking loses source phrases");
     testEventIndex();
+    testStoryProtocol();
     QString auditError;
     require(!StoryNarrative::acceptAudit({{"action", "audit"}, {"pass", true},
                 {"understood_story", "story"}, {"issues", QJsonArray{QJsonObject{{"block", 1}, {"kind", "gap"}, {"problem", "gap"}}}}}, 2, auditError),

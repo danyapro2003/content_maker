@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QQueue>
+#include <QSet>
 #include <QJsonArray>
 #include "mediaextractor.h"
 #include "metadataparser.h"
@@ -13,6 +14,19 @@
 #include "transcriptpacker.h"
 #include "diarizerunner.h"
 #include "stories3pipeline.h"
+
+struct FileRunResult {
+    QString source, status, error, logDirectory;
+    int considered = 0, accepted = 0, rejected = 0, renderedStories = 0, expectedVideos = 0;
+    QStringList outputs;
+    QJsonObject json() const;
+};
+struct QueueRunSummary {
+    int totalFiles = 0;
+    QList<FileRunResult> files;
+    QString text() const;
+    QStringList outputs() const;
+};
 
 class PipelineManager : public QObject
 {
@@ -31,6 +45,7 @@ signals:
     void clipsFound(const QList<Highlight>& clips);
     void storiesFound(const QList<StoryClip>& stories);
     void queueFinished();
+    void queueSummaryReady(const QueueRunSummary& summary);
 
 private slots:
     void onffprobeFinished(const QByteArray& data);
@@ -99,6 +114,10 @@ private:
 
     QQueue<QString> m_fileQueue;
     bool m_isProcessing = false;
+    bool m_fileActive = false;
+    QueueRunSummary m_queueSummary;
+    FileRunResult m_fileResult;
+    QSet<int> m_renderedStoryIds;
 
     MediaExtractor extractor;
     MetadataParser dataParser;
