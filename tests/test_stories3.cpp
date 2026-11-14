@@ -28,6 +28,7 @@ void checkLiveModel(const QString&, const QString&);
 void liveV3Run(const QStringList&);
 void prepareV3Source(const QString&, const QString&);
 void renderV3Evaluation(const QStringList&);
+void retryLoggedV3Request(const QStringList&);
 void replayV3Run(const QString&, const QString&);
 void replayEventIndex(const QString& directory, const QString& packedPath);
 
@@ -638,6 +639,10 @@ int main(int argc, char** argv)
         if (app.arguments().contains("--prepare-v3")) {
             require(argc == 4, "--prepare-v3 settings.json source");
             prepareV3Source(app.arguments()[2], app.arguments()[3]); return 0;
+        }
+        if (app.arguments().contains("--retry-logged-v3")) {
+            require(argc == 5, "--retry-logged-v3 settings.json original.request.json new-log-directory (requires explicit approval)");
+            retryLoggedV3Request(app.arguments()); return 0;
         }
         if (app.arguments().contains("--render-v3")) {
             require(argc == 8, "--render-v3 settings.json source packed.md clean-words.json evaluation_result.json output-directory");

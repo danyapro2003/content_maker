@@ -48,6 +48,53 @@ static void saveObject(const QString& path, const QJsonObject& object)
         throw std::runtime_error(("Cannot save " + path).toStdString());
 }
 
+// Explicit diagnostic command; never called by the automatic retry path.
+void retryLoggedV3Request(const QStringList& args)
+{
+    auto& settings = AppSettings::instance();
+    if (!settings.load(args[2])) throw std::runtime_error("Cannot load settings");
+    const auto original = readObject(args[3]); const auto body = original["body"].toObject();
+    QUrl endpoint(settings.llmBaseUrl);
+    QString endpointText = endpoint.toString(); if (endpointText.endsWith('/')) endpointText.chop(1);
+    endpointText += "/chat/completions";
+    if (original["url"] != endpointText || body["model"] != settings.llmModel || !body["messages"].isArray())
+        throw std::runtime_error("Logged request does not match configured provider/model");
+    const auto modelKey = StoryRunStore::hash({{"model", settings.llmModel},
+        {"provider", endpoint.toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery | QUrl::StripTrailingSlash)}, {"temperature", .7}});
+    const auto key = StoryRunStore::hash({{"model_key", modelKey}, {"messages", body["messages"]}});
+    QDir sourceRoot(QFileInfo(args[3]).absolutePath()); sourceRoot.cdUp(); sourceRoot.cdUp();
+    QDir analysis(sourceRoot.filePath("analysis")); StoryRunStore store; bool found = false;
+    for (const auto& name : analysis.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        if (!QFileInfo::exists(analysis.filePath(name + "/request_" + key + ".json"))) continue;
+        const auto manifest = readObject(analysis.filePath(name + "/manifest.json"));
+        if (!store.open(analysis.absolutePath(), manifest["dependencies"].toObject())) throw std::runtime_error("Cannot open request ledger");
+        if (store.load("request", key, false)["status"] != "outcome_unknown")
+            throw std::runtime_error("Only an unknown-outcome request can be explicitly retried");
+        found = true; break;
+    }
+    if (!found) throw std::runtime_error("Original unknown-outcome ledger record not found");
+    if (QFileInfo::exists(args[4] + "/explicit_retry.json")) throw std::runtime_error("This explicit retry has already been started");
+    if (!QDir().mkpath(args[4])) throw std::runtime_error("Cannot create retry logs");
+    saveObject(args[4] + "/explicit_retry.json", {{"original_request", args[3]}, {"request_key", key}, {"post_limit", 1}});
+    if (!store.save("request", key, {{"stage", original["stage"]}, {"explicit_retry_logs", args[4]}}, "pending"))
+        throw std::runtime_error("Cannot persist retry before POST");
+    QNetworkRequest request{QUrl(endpointText)};
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setRawHeader("Authorization", "Bearer " + settings.llmApiKey.toUtf8());
+    LlmTransport::RetryPolicy policy; policy.maxAttempts = 1;
+    LlmTransport transport(policy); transport.resetBudget(1); QEventLoop loop; bool success = false;
+    QObject::connect(&transport, &LlmTransport::logMessage, &loop, logLine);
+    transport.send(request, body, original["stage"].toString(), "001_explicit_retry", args[4],
+        [&](bool ok, const QString& content, const QString&) {
+            success = ok;
+            store.save("request", key, {{"stage", original["stage"]}, {"content", content}, {"explicit_retry_logs", args[4]}},
+                ok ? "complete" : "outcome_unknown");
+            logLine(ok ? "EXPLICIT_RETRY_COMPLETE: response cached; no automatic further retry." : content); loop.quit();
+        }, qBound(1, settings.llmTimeoutMinutes, 60) * 60000);
+    loop.exec();
+    if (!success) throw std::runtime_error("Explicit one-shot retry failed; inspect logs before any further request");
+}
+
 void renderV3Evaluation(const QStringList& args)
 {
     auto& settings = AppSettings::instance();

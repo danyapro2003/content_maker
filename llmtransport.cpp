@@ -109,6 +109,10 @@ void LlmTransport::send(const QNetworkRequest& request, const QJsonObject& body,
     cancel();
     auto pending = std::make_shared<Pending>();
     pending->request = request;
+    // Long non-streaming gateway responses have failed with HTTP/2 protocol
+    // errors after several minutes. Use HTTP/1.1 for subsequent requests; do
+    // not replay a failed POST automatically when its billing outcome is unknown.
+    pending->request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
     pending->body = body;
     pending->payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
     pending->stage = stage;
@@ -138,6 +142,7 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
         {"stage", pending->stage}, {"request_id", pending->prefix}, {"attempt", number},
         {"max_attempts", m_policy.maxAttempts},
         {"timeout_ms", pending->timeoutMs},
+        {"http2_allowed", false},
         {"started_utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
         {"url", pending->request.url().toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery)},
         {"body", pending->body}});
@@ -206,6 +211,7 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
         saveJson(pending->logDirectory, prefix + ".response.json", {
             {"ok", ok}, {"stage", pending->stage}, {"request_id", pending->prefix}, {"attempt", number},
             {"http_status", status}, {"elapsed_ms", double(elapsed.elapsed())},
+            {"http2_used", reply->attribute(QNetworkRequest::Http2WasUsedAttribute).toBool()},
             {"network_error", networkError == QNetworkReply::NoError ? QString() : reply->errorString()},
             {"timed_out", timedOut}, {"cancelled", pending->cancelled}, {"outcome_unknown", outcomeUnknown},
             {"response_bytes", raw.size()}, {"timeout_ms", pending->timeoutMs},
