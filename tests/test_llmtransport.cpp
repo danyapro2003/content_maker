@@ -192,20 +192,28 @@ static void testCancellation(bool duringRequest)
     QTemporaryDir logs;
     int oldCallbacks = 0, newCallbacks = 0;
     bool cancelled = false;
+    QEventLoop completed;
+    QTimer deadline; deadline.setSingleShot(true);
+    QObject::connect(&deadline, &QTimer::timeout, &completed, &QEventLoop::quit);
     auto restart = [&]() {
         if (cancelled) return;
         cancelled = true;
         transport.cancel();
         transport.send(server.request(), {{"model", "new-run"}}, "index_1", "002_new", logs.path(),
-            [&](bool ok, const QString&, const QString&) { if (ok) ++newCallbacks; });
+            [&](bool ok, const QString&, const QString&) { if (ok) ++newCallbacks; completed.quit(); });
     };
     QObject::connect(&transport, &LlmTransport::logMessage, &transport, [&](const QString& message) {
         if (!duringRequest && message.contains("Повтор")) restart();
     });
     transport.send(server.request(), {{"model", "old-run"}}, "index_1", "001_old", logs.path(),
         [&](bool, const QString&, const QString&) { ++oldCallbacks; });
-    if (duringRequest) QTimer::singleShot(30, &transport, restart);
-    drain(400);
+    QTimer received; received.setInterval(5);
+    QObject::connect(&received, &QTimer::timeout, &transport, [&]() {
+        if (!server.bodies.isEmpty()) { received.stop(); restart(); }
+    });
+    if (duringRequest) received.start();
+    deadline.start(5000); completed.exec(); deadline.stop(); received.stop();
+    drain(200); // Beyond the old retry deadline: no stale timer may send another POST.
     require(cancelled && oldCallbacks == 0 && newCallbacks == 1, "cancelled request reached new run");
     require(server.bodies.size() == 2, "cancelled timer sent a late request");
     require(QFileInfo::exists(logs.filePath("001_old.cancelled.json")), "cancellation not logged");

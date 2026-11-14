@@ -546,10 +546,16 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
     QObject::connect(&manager, &PipelineManager::logMessage, &queueLoop, [&](const QString& message) {
         if (message.contains("[ОШИБКА]")) errors.append(message);
     });
-    QObject::connect(&manager, &PipelineManager::queueFinished, &queueLoop, &QEventLoop::quit);
-    QTimer::singleShot(30000, &queueLoop, &QEventLoop::quit);
-    manager.addFilesToQueue({alpha, beta});
-    queueLoop.exec();
+    bool queueCompleted = false;
+    QObject::connect(&manager, &PipelineManager::queueFinished, &queueLoop, [&]() { queueCompleted = true; queueLoop.quit(); });
+    QTimer queueDeadline; queueDeadline.setSingleShot(true);
+    QObject::connect(&queueDeadline, &QTimer::timeout, &queueLoop, &QEventLoop::quit);
+    auto runQueue = [&](const QStringList& files) {
+        queueCompleted = false; queueDeadline.start(30000); manager.addFilesToQueue(files);
+        if (!queueCompleted) queueLoop.exec();
+        queueDeadline.stop(); require(queueCompleted, "queue watchdog expired before completion");
+    };
+    runQueue({alpha, beta});
     for (const auto& error : errors) QTextStream(stderr) << error << Qt::endl;
     require(errors.isEmpty(), "queue failed");
     for (const QString name : {QString("alpha"), QString("beta")}) {
@@ -576,8 +582,7 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
         require(json.value("duration_sec").toDouble() > 60, "saved EDL does not include final padding");
     }
     settings.s3ChunkSec += 1;
-    manager.addFilesToQueue({alpha});
-    queueLoop.exec();
+    runQueue({alpha});
     require(readFile(temporary.filePath("alpha_clips/temp/asr_calls.txt")) == "2",
             "changed ASR settings reused old transcript");
     require(mock.plans == 4 && mock.reviews == 8 && mock.fidelities == 8, "narrative stages skipped in queue");
@@ -585,7 +590,7 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
     const auto originalEdlPath = previousOutputs["output_directory"].toString() + "/stories.json";
     const auto originalEdl = readFile(originalEdlPath);
     mock.invalidEdits = true;
-    manager.addFilesToQueue({alpha}); queueLoop.exec();
+    runQueue({alpha});
     require(!errors.isEmpty(), "failed rerun was reported as successful");
     require(readFile(originalEdlPath) == originalEdl,
             "failed rerun replaced old EDL");
@@ -601,19 +606,19 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
     require(QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_outputs.json"))).object() == previousOutputs,
             "failed run replaced latest successful output pointer");
     mock.invalidEdits = false; mock.invalidBranch = 2;
-    manager.addFilesToQueue({alpha}); queueLoop.exec();
+    runQueue({alpha});
     auto partial = QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_attempt.json"))).object();
     require(partial["status"] == "partial" && partial["accepted_stories"] == 1 && partial["created_videos"] == 2,
             "one accepted story lost because another failed");
     mock.invalidBranch = 0;
     qputenv("CLIPPER_TEST_FAIL_EN", "1");
-    manager.addFilesToQueue({alpha}); queueLoop.exec();
+    runQueue({alpha});
     qunsetenv("CLIPPER_TEST_FAIL_EN");
     partial = QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_attempt.json"))).object();
     require(partial["status"] == "partial" && partial["rendered_stories"] == 2 && partial["created_videos"] == 2,
             "EN failure discarded successful RU outputs or blocked next story");
     qputenv("CLIPPER_TEST_BAD_PROBE", "1");
-    manager.addFilesToQueue({alpha}); queueLoop.exec();
+    runQueue({alpha});
     qunsetenv("CLIPPER_TEST_BAD_PROBE");
     const auto badProbe = QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_attempt.json"))).object();
     require(badProbe["status"] == "failed" && badProbe["outputs"].toArray().isEmpty(),
