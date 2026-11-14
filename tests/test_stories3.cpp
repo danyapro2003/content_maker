@@ -23,6 +23,7 @@ void testEventIndex();
 void testStoryProtocol();
 void testStoryRunStore();
 void testStoryTimeline();
+void testStoryContext();
 void replayV3Run(const QString&, const QString&);
 void replayEventIndex(const QString& directory, const QString& packedPath);
 
@@ -143,12 +144,19 @@ public:
                         QJsonArray branches;
                         for (int branch = 1; branch <= 2; ++branch) {
                             const QJsonArray required = branch == 1 ? QJsonArray{"C1E1", "C1E3", "C1E7"} : QJsonArray{"C1E2", "C1E4", "C1E8"};
-                            branches.append(QJsonObject{{"branch_id", branch}, {"title", label + QString::number(branch)},
-                                {"goal", "goal " + QString::number(branch)}, {"summary", "branch"}, {"ending", "reaction"},
-                                {"opening_mode", "natural"}, {"hook_reason", "intrigue"},
+                            QJsonArray chain;
+                            for (int i = 0; i < required.size(); ++i) chain.append(QJsonObject{{"event_id", required[i]},
+                                {"function", i == required.size() - 1 ? "payoff" : "cause"},
+                                {"depends_on", i ? QJsonArray{required[i - 1]} : QJsonArray{}}});
+                            branches.append(QJsonObject{{"branch_id", QString("B%1").arg(branch)}, {"title", label + QString::number(branch)},
+                                {"dramatic_question", "goal " + QString::number(branch)}, {"ending_effect", "reaction"},
+                                {"hook", QJsonObject{{"event_id", required[0]}, {"mode", "natural"}, {"why_interesting", "intrigue"}}},
+                                {"chain", chain}, {"missing_evidence", QJsonArray{}},
+                                {"source_unit_ids", branch == 1 ? QJsonArray{"U1", "U3", "U5", "U7"} : QJsonArray{"U2", "U4", "U6", "U8"}},
                                 {"required_events", required}, {"ending_event", branch == 1 ? "C1E7" : "C1E8"}});
                         }
-                        content = QString::fromUtf8(QJsonDocument(QJsonObject{{"action", "plan_stories"}, {"branches", branches}}).toJson());
+                        content = QString::fromUtf8(QJsonDocument(QJsonObject{{"protocol_version", 2}, {"action", "plan_stories"},
+                            {"primary", branches}, {"reserve", QJsonArray{}}}).toJson());
                     } else if (system.contains("STAGE_VIEWER") || system.contains("STAGE_FIDELITY")) {
                         const bool viewer = system.contains("STAGE_VIEWER");
                         if (viewer) ++reviews; else ++fidelities;
@@ -160,18 +168,28 @@ public:
                         }).toJson());
                     } else {
                         if (system.contains("STAGE_REPAIR")) ++repairs;
-                        const QString user = messages.last().toObject().value("content").toString();
-                        const auto match = QRegularExpression("\\\"branch_id\\\"\\s*:\\s*(\\d+)").match(user);
+                        const QString user = messages[1].toObject().value("content").toString();
+                        const auto match = QRegularExpression("\\\"branch_id\\\"\\s*:\\s*\\\"?B?(\\d+)").match(user);
                         const int branch = match.hasMatch() ? match.captured(1).toInt() : 1;
                         auto stories = storyJson(label, branch);
                         if (invalidEdits || omitRequired) {
                             auto story = stories[0].toObject(); auto segments = story["segments"].toArray();
                             auto broken = segments[1].toObject();
-                            if (invalidEdits) broken["quote"] = "INVENTED_QUOTE";
+                            if (invalidEdits) broken["end_phrase"] = 99999;
                             if (omitRequired) { broken["start_phrase"] = idsForMissing(branch); broken["end_phrase"] = idsForMissing(branch); }
                             segments[1] = broken; story["segments"] = segments; stories[0] = story;
                         }
-                        content = QString::fromUtf8(QJsonDocument(stories).toJson());
+                        auto story = stories[0].toObject();
+                        auto segments = story["segments"].toArray();
+                        for (int i = 0; i < segments.size(); ++i) {
+                            auto segment = segments[i].toObject();
+                            segment["block_id"] = QString("B%1_%2").arg(branch).arg(i + 1);
+                            segment["role"] = segment["beat"].toString().toLower();
+                            segments[i] = segment;
+                        }
+                        story["segments"] = segments;
+                        content = QString::fromUtf8(QJsonDocument(QJsonObject{{"protocol_version", 2}, {"action", "edit_story"},
+                            {"branch_id", QString("B%1").arg(branch)}, {"story", story}}).toJson());
                     }
                     ++calls;
                     const QByteArray body = QJsonDocument(QJsonObject{{"choices", QJsonArray{
@@ -386,6 +404,7 @@ static void runTests(const QString& python)
     testStoryProtocol();
     testStoryRunStore();
     testStoryTimeline();
+    testStoryContext();
     QString auditError;
     require(!StoryNarrative::acceptAudit({{"action", "audit"}, {"pass", true},
                 {"understood_story", "story"}, {"issues", QJsonArray{QJsonObject{{"block", 1}, {"kind", "gap"}, {"problem", "gap"}}}}}, 2, auditError),
@@ -519,7 +538,7 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
         const auto saved = QJsonDocument::fromJson(readFile(base + "/stories.json")).array();
         require(saved.size() == 2, "saved EDL contains only one story");
         const auto json = saved.first().toObject();
-        require(json["segments"].toArray().first().toObject()["beat"].toString() == "HOOK",
+        require(json["segments"].toArray().first().toObject()["beat"].toString().toLower() == "hook",
                 "saved story does not start with a hook");
         require(json.value("duration_sec").toDouble() > 60, "saved EDL does not include final padding");
     }

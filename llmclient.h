@@ -9,6 +9,7 @@
 #include "stories3runner.h"
 #include "storytypes.h"
 #include "storyrunstore.h"
+#include "storycontext.h"
 
 struct Highlight {
     QString title;
@@ -130,6 +131,11 @@ private:
     QString m_story3RequestKey;
     bool m_story3Active = false;
     QString m_importLogDirectory;
+    QList<StoryContext::SourceUnit> m_story3Units;
+    StoryContext::BranchContext m_story3Context;
+    QStringList m_story3ExtraUnits;
+    int m_story3ContextRequests = 0;
+    QString storyEditorMaterial() const;
     QString stageCacheKey(const QJsonArray& messages) const;
 
     // Общая подготовка текста сабов по настройке; false — текста нет
