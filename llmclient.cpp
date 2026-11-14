@@ -39,7 +39,7 @@ void LlmClient::checkModelFormat(const QString& logDirectory)
     const auto& settings = AppSettings::instance();
     const QJsonObject dependencies{{"model", settings.llmModel},
         {"provider", QUrl(settings.llmBaseUrl).toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery)},
-        {"prompt", StoryRunStore::hashText(StoryNarrative::auditPrompt(false))}, {"examples_version", 1}};
+        {"prompt", StoryRunStore::hashText(StoryNarrative::auditPrompt(false))}, {"examples_version", 1}, {"transport", "sse_http1_v1"}};
     m_modelCheckKey = StoryRunStore::hash(dependencies);
     m_story3Store.open(QFileInfo(logDirectory).absolutePath() + "/model_format_cache", dependencies);
     const auto saved = m_story3Store.load("format", m_modelCheckKey);

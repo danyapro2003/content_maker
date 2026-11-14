@@ -306,6 +306,8 @@ int main(int argc, char** argv)
         for (int status : {408, 502, 504}) testCase({Response{status}, Response{}}, 2, true);
         for (int status : {400, 401, 403, 404, 422}) testCase({Response{status}}, 1, false);
         testCase({Response{200, {}, "{}"}}, 1, false);
+        testCase({Response{200, {}, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"O\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"K\"}}]}\n\ndata: [DONE]\n\n"}}, 1, true);
+        testCase({Response{200, {}, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"}}]}\n\n"}}, 1, false, fastPolicy(), 0, 0, true);
         testCase({Response{200, {}, "not json"}}, 1, false);
         testCase({Response{429, "2"}}, 1, false);
         testCase({Response{429, "1"}, Response{}}, 2, true, fastPolicy(), 1000);

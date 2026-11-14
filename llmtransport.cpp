@@ -33,6 +33,39 @@ static void saveJson(const QString& directory, const QString& name, const QJsonO
     saveBytes(directory, name, QJsonDocument(value).toJson(QJsonDocument::Indented));
 }
 
+static QJsonDocument decodeResponse(const QByteArray& raw, bool& incomplete)
+{
+    const auto plain = QJsonDocument::fromJson(raw);
+    if (plain.isObject()) return plain; // Compatibility with gateways returning regular JSON.
+    if (!raw.trimmed().startsWith("data:") && !raw.trimmed().startsWith(':')) return plain;
+    QString content; QJsonObject usage; bool done = false, valid = true;
+    QByteArray event;
+    auto consume = [&]() {
+        if (event.isEmpty()) return;
+        if (event.trimmed() == "[DONE]") { done = true; event.clear(); return; }
+        const auto document = QJsonDocument::fromJson(event);
+        if (!document.isObject() || document.object().contains("error")) valid = false;
+        const auto object = document.object();
+        for (const auto& item : object["choices"].toArray()) {
+            const auto choice = item.toObject();
+            if (choice["index"].toInt() == 0) content += choice["delta"].toObject()["content"].toString();
+        }
+        if (object["usage"].isObject()) usage = object["usage"].toObject();
+        event.clear();
+    };
+    for (auto line : raw.split('\n')) {
+        if (line.endsWith('\r')) line.chop(1);
+        if (line.isEmpty()) { consume(); continue; }
+        if (line.startsWith("data:")) {
+            if (!event.isEmpty()) event += '\n';
+            event += line.mid(5).trimmed();
+        }
+    }
+    consume();
+    incomplete = !done || !valid;
+    return QJsonDocument(QJsonObject{{"choices", QJsonArray{QJsonObject{{"message", QJsonObject{{"content", content}}}}}}, {"usage", usage}});
+}
+
 LlmTransport::LlmTransport(QObject* parent) : LlmTransport(RetryPolicy{}, parent) {}
 
 LlmTransport::LlmTransport(const RetryPolicy& policy, QObject* parent)
@@ -114,7 +147,8 @@ void LlmTransport::send(const QNetworkRequest& request, const QJsonObject& body,
     // not replay a failed POST automatically when its billing outcome is unknown.
     pending->request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
     pending->body = body;
-    pending->payload = QJsonDocument(body).toJson(QJsonDocument::Compact);
+    pending->body["stream"] = true;
+    pending->payload = QJsonDocument(pending->body).toJson(QJsonDocument::Compact);
     pending->stage = stage;
     pending->prefix = prefix;
     pending->logDirectory = logDirectory;
@@ -179,22 +213,25 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
         const auto networkError = reply->error();
         if (reply->isOpen()) received->append(reply->readAll());
         const QByteArray raw = *received;
-        const auto document = QJsonDocument::fromJson(raw);
+        bool incompleteStream = false;
+        const auto document = decodeResponse(raw, incompleteStream);
+        if (pending->body["stream"].toBool()) saveBytes(pending->logDirectory, prefix + ".response.raw", raw);
         const auto retryAfter = reply->rawHeader("Retry-After");
         const bool transportError = networkError != QNetworkReply::NoError
             && (networkError < QNetworkReply::ContentAccessDenied
                 || networkError == QNetworkReply::ProtocolFailure || networkError == QNetworkReply::ProtocolUnknownError);
         // A missing/truncated response does not establish that the server rejected the POST.
         // Replaying it can create a second billable generation.
-        const bool outcomeUnknown = timedOut || status == 0 || transportError;
+        const bool outcomeUnknown = timedOut || status == 0 || transportError || incompleteStream;
         QString content = document.object().value("choices").toArray().first().toObject()
             .value("message").toObject().value("content").toString();
-        const bool ok = !pending->cancelled && !timedOut && networkError == QNetworkReply::NoError
+        const bool ok = !pending->cancelled && !timedOut && !incompleteStream && networkError == QNetworkReply::NoError
             && status >= 200 && status < 300 && !content.trimmed().isEmpty();
         QString reason;
         if (!ok) {
             if (pending->cancelled) reason = "Запрос отменён";
             else if (timedOut) reason = "Истекло время ожидания ответа LLM";
+            else if (incompleteStream) reason = "Поток LLM оборван или повреждён: нет корректного завершения [DONE]";
             else if (networkError == QNetworkReply::NoError && status >= 200 && status < 300)
                 reason = "LLM вернул пустой или некорректный ответ";
             else reason = QString("HTTP %1: %2").arg(status).arg(reply->errorString());
