@@ -48,7 +48,9 @@ QJsonArray eventCards(const QJsonArray& events, const QList<SourceUnit>& units)
         for (const auto& field : {"event_id", "observed", "evidence_phrase", "viewer_requires", "viewer_learns", "character_knowledge", "uncertainties"})
             if (event.contains(field)) card[field] = event[field];
         const int index = unitFor(event["evidence_phrase"].toInt(), units);
-        if (index >= 0) card["source_unit"] = units[index].card();
+        // The complete catalog is sent once after the event cards. Repeating its
+        // timestamps for every event inflated real planning requests substantially.
+        if (index >= 0) card["source_unit_id"] = units[index].id;
         cards.append(card);
     }
     return cards;
