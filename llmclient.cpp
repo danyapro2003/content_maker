@@ -828,6 +828,14 @@ void LlmClient::startNextStoryBranchV3()
     if (m_story3BranchIndex >= m_story3Plans.size() || m_story3Results.size() >= settings.minClips) {
         finishSelectionV3(); return;
     }
+    m_story3Shortenings = 0;
+    m_story3Replans = 0;
+    beginStoryBranchV3();
+}
+
+void LlmClient::beginStoryBranchV3()
+{
+    const auto& settings = AppSettings::instance();
     m_story3Plan = m_story3Plans[m_story3BranchIndex].toObject();
     m_story3Phase = Story3Phase::Edit; m_story3Retried = false;
     m_story3Sent = 0; m_story3Turn = 0; m_story3Repairs = 0; m_story3Draft.clear();
@@ -874,6 +882,7 @@ void LlmClient::saveStoryStateV3(const QString& status, const QJsonObject& detai
     const auto state = QJsonObject{{"status", status}, {"branch", m_story3Plan},
         {"drafts", serializeStories(m_story3Draft)}, {"repairs", m_story3Repairs},
         {"format_repairs", m_story3FormatRepairs}, {"context_requests", m_story3ContextRequests},
+        {"shortenings", m_story3Shortenings}, {"replans", m_story3Replans},
         {"details", details}};
     writeRunArtifact(QString("branch_%1.state.json").arg(m_story3BranchIndex + 1), state);
     m_story3Store.save("branch", StoryRunStore::hash({{"plan_key", m_story3PlanKey}, {"branch", m_story3Plan}}), state,
@@ -925,8 +934,35 @@ void LlmClient::rejectStoryV3(const QString& reason)
 
 void LlmClient::repairStoryV3(const QJsonObject& report)
 {
-    if (m_story3Repairs >= 2) { rejectStoryV3("после двух исправлений остались проблемы: " + QString::fromUtf8(QJsonDocument(report).toJson())); return; }
-    ++m_story3Repairs;
+    bool tooLong = false;
+    for (const auto& value : report["issues"].toArray())
+        if (value.toObject()["code"] == "DRAFT_TOO_LONG") tooLong = true;
+    if (tooLong && m_story3Shortenings >= 2 && m_story3Replans == 0) {
+        ++m_story3Replans;
+        m_story3Phase = Story3Phase::Replan;
+        m_story3Sent = 0;
+        m_story3Retried = false;
+        const auto& s = AppSettings::instance();
+        QJsonArray units;
+        for (const auto& unit : m_story3Units)
+            if (m_story3Context.unitIds.contains(unit.id)) units.append(unit.card());
+        m_story3Messages = {
+            QJsonObject{{"role", "system"}, {"content", "STAGE_REPLAN. Сузь конфликт текущей истории и выбери более близкий подготовленный финал. Используй только события предоставленной ветки."}},
+            QJsonObject{{"role", "user"}, {"content", StoryNarrative::planPrompt(m_story3Context.events, 1, 1, s.s3MinClipSec, s.s3MaxClipSec)
+                + "\nПредыдущий замысел:\n" + QString::fromUtf8(QJsonDocument(m_story3Plan).toJson())
+                + "\nКаталог материала:\n" + QString::fromUtf8(QJsonDocument(units).toJson())}}
+        };
+        saveStoryStateV3("replan", report);
+        emit logMessage("LLM v3: два сокращения не уложились в лимит; сужаю замысел ветки (1/1).");
+        runStoryTurnV3(); return;
+    }
+    if (tooLong) {
+        if (m_story3Shortenings >= 2) { rejectStoryV3("История не помещается после двух сокращений и перепланирования."); return; }
+        ++m_story3Shortenings;
+    } else {
+        if (m_story3Repairs >= 2) { rejectStoryV3("после двух исправлений остались проблемы: " + QString::fromUtf8(QJsonDocument(report).toJson())); return; }
+        ++m_story3Repairs;
+    }
     m_story3LastReport = report;
     m_story3BaseDraftHash = StoryRunStore::hash({{"draft", serializeStories(m_story3Draft)}});
     saveStoryStateV3("repair", report);
@@ -940,7 +976,17 @@ void LlmClient::repairStoryV3(const QJsonObject& report)
             + "\nЧерновик:\n" + QString::fromUtf8(QJsonDocument(serializeStories(m_story3Draft)).toJson())
             + "\n" + storyEditInstructions(AppSettings::instance())
             + "\nВ корень edit_story добавь base_draft_hash: " + m_story3BaseDraftHash}}};
-    emit logMessage(QString("LLM v3: исправление %1/2.").arg(m_story3Repairs));
+    if (tooLong) {
+        auto instruction = m_story3Messages.first().toObject();
+        instruction["content"] = "STAGE_REPAIR. STAGE_SHORTEN. Сократи монтаж до указанного лимита. "
+            "Замечания содержат точную длительность каждого блока и число лишних секунд. "
+            "Материал разбит на source units с ID, границами и длительностями. Выбери из них нужные разговорные фрагменты. "
+            "Один интервал включает ВСЁ между start_phrase и end_phrase. Для удалённых эпизодов используй отдельные блоки. "
+            "Сохрани хук, причины решений, вопросы с ответами и финал. Удали повторения и побочные эпизоды. "
+            "Не соединяй начало и конец длинной ветки одним диапазоном. Не выдумывай реплики. Верни edit_story.";
+        m_story3Messages[0] = instruction;
+        emit logMessage(QString("LLM v3: сокращение длинного монтажа %1/2.").arg(m_story3Shortenings));
+    } else emit logMessage(QString("LLM v3: исправление %1/2.").arg(m_story3Repairs));
     runStoryTurnV3();
 }
 
@@ -956,10 +1002,15 @@ void LlmClient::runStoryTurnV3()
     case Story3Phase::Viewer: phase = "viewer"; break;
     case Story3Phase::Fidelity: phase = "fidelity"; break;
     case Story3Phase::Repair: phase = "repair"; break;
+    case Story3Phase::Replan: phase = "replan"; break;
     }
     const auto stage = m_story3BranchIndex < 0 ? phase : QString("branch_%1_%2").arg(m_story3BranchIndex + 1).arg(phase);
     sendChat(m_story3Messages, [this](bool ok, const QString& content) {
         if (!ok) {
+            if (m_story3BranchIndex >= 0 && content.startsWith("EMPTY_LLM_RESPONSE:")) {
+                rejectStoryV3("Сервис завершил запрос с пустым ответом; перехожу к следующей истории.");
+                return;
+            }
             saveStoryStateV3(content.contains("REQUEST_BUDGET_EXHAUSTED") ? "budget_exhausted" : "transport_error", {{"error", content}});
             if (m_story3BranchIndex >= 0) finishSelectionV3(content);
             else emit errorOccurred("LLM v3: " + content);
@@ -979,6 +1030,17 @@ void LlmClient::runStoryTurnV3()
         QStringList notes;
         QString error;
         const auto object = storyObject(content);
+        if (m_story3Phase == Story3Phase::Replan) {
+            const auto checked = StoryContext::plans(object, m_story3Context.events, m_story3Units,
+                1, 1, 0, s.s3MinClipSec, s.s3MaxClipSec, s.s3BranchContextChars);
+            if (!checked.ok()) { rejectStoryV3("Не удалось сузить замысел: " + checked.messages().join("; ")); return; }
+            auto replacement = checked.value.first().toObject();
+            replacement["branch_id"] = m_story3Plan["branch_id"];
+            replacement["is_reserve"] = m_story3Plan["is_reserve"];
+            m_story3Plans[m_story3BranchIndex] = replacement;
+            writeRunArtifact(m_lastRequestPrefix + ".replanned.json", replacement);
+            beginStoryBranchV3(); return;
+        }
         if ((m_story3Phase == Story3Phase::Edit || m_story3Phase == Story3Phase::Repair) && object["action"] == "get_context") {
             if (++m_story3ContextRequests > 1) { rejectStoryV3("Исчерпан лимит дополнительного контекста."); return; }
             QString contextError;

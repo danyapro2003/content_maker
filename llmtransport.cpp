@@ -233,7 +233,7 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
             else if (timedOut) reason = "Истекло время ожидания ответа LLM";
             else if (incompleteStream) reason = "Поток LLM оборван или повреждён: нет корректного завершения [DONE]";
             else if (networkError == QNetworkReply::NoError && status >= 200 && status < 300)
-                reason = "LLM вернул пустой или некорректный ответ";
+                reason = "EMPTY_LLM_RESPONSE: LLM завершил запрос без содержательного ответа";
             else reason = QString("HTTP %1: %2").arg(status).arg(reply->errorString());
             content = reason + " " + QString::fromUtf8(raw).left(500);
             if (outcomeUnknown && !pending->cancelled)

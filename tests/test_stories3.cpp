@@ -77,6 +77,9 @@ public:
     int reviews = 0;
     bool invalidEdits = false;
     int invalidBranch = 0;
+    int emptyBranch = 0;
+    int longBranch = 0;
+    int shortenings = 0;
     bool omitRequired = false;
     bool viewerFailOnce = false;
     bool viewerAlwaysFails = false;
@@ -198,11 +201,18 @@ public:
                             segments[i] = segment;
                         }
                         story["segments"] = segments;
+                        if (system.contains("STAGE_SHORTEN")) ++shortenings;
+                        if (longBranch == branch && !system.contains("STAGE_SHORTEN")) {
+                            auto continuous = segments.first().toObject();
+                            continuous["end_phrase"] = segments.last().toObject()["end_phrase"];
+                            story["segments"] = QJsonArray{continuous};
+                        }
                         QJsonObject response{{"protocol_version", 2}, {"action", "edit_story"},
                             {"branch_id", QString("B%1").arg(branch)}, {"story", story}};
                         const auto baseHash = QRegularExpression("base_draft_hash: ([a-f0-9]{64})").match(user);
                         if (baseHash.hasMatch()) response["base_draft_hash"] = baseHash.captured(1);
                         content = QString::fromUtf8(QJsonDocument(response).toJson());
+                        if (emptyBranch == branch) content.clear();
                     }
                     ++calls;
                     const QByteArray body = QJsonDocument(QJsonObject{{"choices", QJsonArray{
@@ -611,6 +621,19 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
     require(partial["status"] == "partial" && partial["accepted_stories"] == 1 && partial["created_videos"] == 2,
             "one accepted story lost because another failed");
     mock.invalidBranch = 0;
+    mock.emptyBranch = 1;
+    runQueue({alpha});
+    partial = QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_attempt.json"))).object();
+    require(partial["status"] == "partial" && partial["accepted_stories"] == 1 && partial["created_videos"] == 2,
+            "empty first branch stopped processing later stories");
+    mock.emptyBranch = 0;
+    mock.longBranch = 1;
+    const int previousShortenings = mock.shortenings;
+    runQueue({alpha});
+    partial = QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_attempt.json"))).object();
+    require(mock.shortenings > previousShortenings && partial["accepted_stories"] == 2,
+            "long montage did not reach shortening and subsequent audits");
+    mock.longBranch = 0;
     qputenv("CLIPPER_TEST_FAIL_EN", "1");
     runQueue({alpha});
     qunsetenv("CLIPPER_TEST_FAIL_EN");

@@ -105,7 +105,7 @@ private:
     int m_story3Sent = 0;
     bool m_story3Retried = false;
     QJsonArray m_story3Messages;
-    enum class Story3Phase { Index, Plan, Edit, Viewer, Fidelity, Repair };
+    enum class Story3Phase { Index, Plan, Edit, Viewer, Fidelity, Repair, Replan };
     Story3Phase m_story3Phase = Story3Phase::Plan;
     QJsonObject m_story3Plan;
     QJsonArray m_story3Plans;
@@ -121,6 +121,9 @@ private:
     void handleEventResponseV3(const QJsonObject& response);
     void auditStoryV3(bool fidelity);
     void repairStoryV3(const QJsonObject& report);
+    void beginStoryBranchV3();
+    int m_story3Shortenings = 0;
+    int m_story3Replans = 0;
     void rejectStoryV3(const QString& reason);
     bool checkEventCoverageV3(const StoryClip& clip, QStringList& notes) const;
     QJsonArray m_story3Events;
