@@ -129,6 +129,14 @@ public:
     double s3MaxSegmentSec = 35.0; // preferred block length, not a hard rejection limit
     int s3SubtitleFontSize = 58;  // pixels at 1080x1920
     int s3SubtitleWords = 4;
+    enum class StoryRunMode { Continue, RebuildStories, FullAnalysis };
+    StoryRunMode s3RunMode = StoryRunMode::RebuildStories;
+    int s3RequestLimit = 80;
+    int s3ReserveBranches = 2;
+    int s3BranchContextChars = 40000;
+    int s3TimestampOverlapMs = 80;
+    bool s3AllowPartial = true;
+    bool s3AllowUnknownRetry = false; // explicit, one-run UI choice; never persisted
 
 private:
     AppSettings() = default;

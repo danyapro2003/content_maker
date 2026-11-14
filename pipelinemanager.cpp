@@ -192,7 +192,8 @@ void PipelineManager::startPipeline(const QString& path)
     emit logMessage("=== Файл: " + baseName + " ===");
     emit logMessage("Логи текущего прогона: " + m_runLogDirectory);
     if (m_mode == Mode::Stories3)
-        emit logMessage("V3: каждый запуск заново вызывает LLM; готовые транскрипты берутся из кэша. "
+        emit logMessage(QString("V3: %1; готовые транскрипты берутся из кэша. ").arg(
+            QStringList{"продолжение анализа", "пересборка историй по готовой карте", "полный анализ LLM"}.value(int(settings.s3RunMode))) +
                         "Число историй " + QString::number(settings.minClips) + "–"
                         + QString::number(settings.maxClips) + ", лимит каждой истории "
                         + QString::number(settings.s3MaxClipSec) + " с.");

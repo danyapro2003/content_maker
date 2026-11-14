@@ -8,6 +8,7 @@
 #include "metadataparser.h"
 #include "stories3runner.h"
 #include "storytypes.h"
+#include "storyrunstore.h"
 
 struct Highlight {
     QString title;
@@ -25,6 +26,9 @@ public:
     LlmClient();
     void setRunLogDirectory(const QString& directory);
     void writeRunArtifact(const QString& name, const QJsonObject& value) const;
+    void setAnalysisDirectory(const QString& directory) { m_analysisDirectory = directory; }
+    bool importEventMapV3(const QString& logDirectory, QString& error);
+    void setImportLogDirectory(const QString& directory) { m_importLogDirectory = directory; }
 
     // subsRu / subsEn — текст субтитров (может быть пустым, если отключено в настройках)
     void findHighlights(const MediaInfo& info, const QString& subsRu, const QString& subsEn);
@@ -121,6 +125,12 @@ private:
     int m_story3Chunk = -1;
     int m_story3Repairs = 0;
     QList<StoryClip> m_story3Draft;
+    StoryRunStore m_story3Store;
+    QString m_analysisDirectory, m_story3ModelKey, m_story3IndexKey, m_story3PlanKey;
+    QString m_story3RequestKey;
+    bool m_story3Active = false;
+    QString m_importLogDirectory;
+    QString stageCacheKey(const QJsonArray& messages) const;
 
     // Общая подготовка текста сабов по настройке; false — текста нет
     bool buildSubsText(const QString& subsRu, const QString& subsEn);

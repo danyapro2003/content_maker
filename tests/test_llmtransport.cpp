@@ -211,6 +211,29 @@ static void testCancellation(bool duringRequest)
     require(QFileInfo::exists(logs.filePath("001_old.cancelled.json")), "cancellation not logged");
 }
 
+static void testRequestBudget()
+{
+    MockServer server({Response{429}, Response{}});
+    LlmTransport transport(fastPolicy());
+    transport.resetBudget(1);
+    QTemporaryDir logs;
+    QEventLoop loop;
+    bool completed = false;
+    transport.send(server.request(), {{"model", "test"}}, "test", "001", logs.path(),
+        [&](bool ok, const QString& content, const QString&) {
+            require(!ok && content.contains("REQUEST_BUDGET_EXHAUSTED"), "retry bypassed budget");
+            completed = true; loop.quit();
+        });
+    QTimer::singleShot(1000, &loop, &QEventLoop::quit); loop.exec();
+    require(completed && server.bodies.size() == 1 && transport.postsUsed() == 1, "extra paid retry");
+    completed = false;
+    transport.send(server.request(), {{"model", "test"}}, "other_stage", "002", logs.path(),
+        [&](bool ok, const QString& content, const QString&) {
+            completed = !ok && content.contains("REQUEST_BUDGET_EXHAUSTED");
+        });
+    require(completed && server.bodies.size() == 1, "new stage reset global budget");
+}
+
 static void testCacheDeployment()
 {
     QTemporaryDir temporary;
@@ -288,6 +311,7 @@ int main(int argc, char** argv)
         testCancellation(false);
         testCancellation(true);
         testCacheDeployment();
+        testRequestBudget();
         QTextStream(stdout) << "LLM retry, cancellation, logging and deployment cache tests passed\n";
         return 0;
     } catch (const std::exception& error) {

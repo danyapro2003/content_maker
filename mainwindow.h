@@ -107,5 +107,9 @@ private:
     QSpinBox* spS3MaxSegmentSec = nullptr;
     QSpinBox* spS3SubtitleFontSize = nullptr;
     QSpinBox* spS3SubtitleWords = nullptr;
+    QComboBox* cbS3RunMode = nullptr;
+    QSpinBox* spS3Requests = nullptr;
+    QCheckBox* chkS3Partial = nullptr;
+    QCheckBox* chkS3UnknownRetry = nullptr;
 };
 #endif // MAINWINDOW_H

@@ -21,6 +21,7 @@
 
 void testEventIndex();
 void testStoryProtocol();
+void testStoryRunStore();
 void replayEventIndex(const QString& directory, const QString& packedPath);
 
 static void require(bool condition, const char* message)
@@ -332,6 +333,34 @@ static void runTests(const QString& python)
                 "unselected dialogue leaked to blind viewer");
     }
     require(viewers == 2, "viewer audit skipped");
+    settings.s3RunMode = AppSettings::StoryRunMode::Continue;
+    found = false;
+    client.findStoriesV3(info, packed, phrases); agentLoop.exec();
+    require(found && mock.calls == 8, "resume repaid completed stages");
+    const QDir analysis(temporary.filePath("analysis"));
+    const auto keys = analysis.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    require(keys.size() == 1, "unexpected analysis cache key");
+    const QDir cached(analysis.filePath(keys.first()));
+    bool markedPending = false;
+    for (const auto& name : cached.entryList({"request_*.json"}, QDir::Files)) {
+        auto envelope = QJsonDocument::fromJson(readFile(cached.filePath(name))).object();
+        if (envelope["data"].toObject()["stage"] != "index_1") continue;
+        envelope["status"] = "pending";
+        writeFile(cached.filePath(name), QJsonDocument(envelope).toJson());
+        markedPending = true;
+    }
+    require(markedPending, "no persistent request ledger");
+    settings.s3RunMode = AppSettings::StoryRunMode::FullAnalysis;
+    LlmClient uncertain;
+    uncertain.setRunLogDirectory(temporary.filePath("uncertain_logs"));
+    QEventLoop unknownLoop; bool blockedUnknown = false;
+    QObject::connect(&uncertain, &LlmClient::errorOccurred, &unknownLoop, [&](const QString& error) {
+        blockedUnknown = error.contains("OUTCOME_UNKNOWN"); unknownLoop.quit();
+    });
+    QTimer::singleShot(1000, &unknownLoop, &QEventLoop::quit);
+    uncertain.findStoriesV3(info, packed, phrases); unknownLoop.exec();
+    require(blockedUnknown && mock.calls == 8, "unknown request automatically repeated after restart");
+    settings.s3RunMode = AppSettings::StoryRunMode::RebuildStories;
     auto natural = clip;
     natural.segments = {clip.segments.first()};
     natural.segments[0].endSec = natural.segments[0].startSec + 65;
@@ -351,6 +380,7 @@ static void runTests(const QString& python)
     require(windows.size() > 1 && seen.size() == phrases.size(), "event chunking loses source phrases");
     testEventIndex();
     testStoryProtocol();
+    testStoryRunStore();
     QString auditError;
     require(!StoryNarrative::acceptAudit({{"action", "audit"}, {"pass", true},
                 {"understood_story", "story"}, {"issues", QJsonArray{QJsonObject{{"block", 1}, {"kind", "gap"}, {"problem", "gap"}}}}}, 2, auditError),

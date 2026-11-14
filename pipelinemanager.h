@@ -39,6 +39,7 @@ public:
 
     void addFilesToQueue(const QStringList& files);
     void setMode(Mode mode) { m_mode = mode; }
+    void setImportLogDirectory(const QString& directory) { llm.setImportLogDirectory(directory); }
 
 signals:
     void logMessage(const QString& msg);

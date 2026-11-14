@@ -160,6 +160,11 @@ bool AppSettings::load()
     s3Filmstrip       = o.value("s3Filmstrip").toBool(s3Filmstrip);
     s3QuoteCheck      = o.value("s3QuoteCheck").toBool(s3QuoteCheck);
     s3MinScore        = o.value("s3MinScore").toDouble(s3MinScore);
+    s3RunMode = StoryRunMode(qBound(0, o.value("s3RunMode").toInt(int(s3RunMode)), 2));
+    s3RequestLimit = qBound(1, o.value("s3RequestLimit").toInt(s3RequestLimit), 500);
+    s3ReserveBranches = qBound(0, o.value("s3ReserveBranches").toInt(s3ReserveBranches), 5);
+    s3BranchContextChars = qBound(5000, o.value("s3BranchContextChars").toInt(s3BranchContextChars), 100000);
+    s3AllowPartial = o.value("s3AllowPartial").toBool(s3AllowPartial);
     s3MinClipSec      = o.value("s3MinClipSec").toDouble(s3MinClipSec);
     s3MaxClipSec      = o.value("s3MaxClipSec").toDouble(s3MaxClipSec);
     s3MaxSpanSec      = o.value("s3MaxSpanSec").toDouble(s3MaxSpanSec);
@@ -239,6 +244,11 @@ bool AppSettings::save() const
     o["s3Filmstrip"]       = s3Filmstrip;
     o["s3QuoteCheck"]      = s3QuoteCheck;
     o["s3MinScore"]        = s3MinScore;
+    o["s3RunMode"] = int(s3RunMode);
+    o["s3RequestLimit"] = s3RequestLimit;
+    o["s3ReserveBranches"] = s3ReserveBranches;
+    o["s3BranchContextChars"] = s3BranchContextChars;
+    o["s3AllowPartial"] = s3AllowPartial;
     o["s3MinClipSec"]      = s3MinClipSec;
     o["s3MaxClipSec"]      = s3MaxClipSec;
     o["s3MaxSpanSec"]      = s3MaxSpanSec;

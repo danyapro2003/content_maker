@@ -36,6 +36,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(Manager, &PipelineManager::storiesFound, this, &MainWindow::fillStoriesTable);
     connect(Manager, &PipelineManager::queueFinished, this, [this]() {
         ui->start_pb->setEnabled(true);
+        if (chkS3UnknownRetry) chkS3UnknownRetry->setChecked(false);
+        AppSettings::instance().s3AllowUnknownRetry = false;
     });
     auto* openOutputs = new QPushButton("Открыть новые клипы", this);
     auto* openLogs = new QPushButton("Открыть логи", this);
@@ -467,6 +469,25 @@ void MainWindow::buildSettingsTab()
     spS3SubtitleWords = new QSpinBox(this);
     spS3SubtitleWords->setRange(1, 6);
     s3->addRow("Слов в строке V3:", spS3SubtitleWords);
+    cbS3RunMode = new QComboBox(this);
+    cbS3RunMode->addItems({"Продолжить анализ", "Пересобрать истории по готовой карте", "Полный анализ LLM"});
+    s3->addRow("Режим запуска:", cbS3RunMode);
+    spS3Requests = new QSpinBox(this); spS3Requests->setRange(1, 500);
+    s3->addRow("Лимит API-запросов на файл:", spS3Requests);
+    chkS3Partial = new QCheckBox("Сохранять годные истории при недоборе количества", this);
+    s3->addRow(chkS3Partial);
+    chkS3UnknownRetry = new QCheckBox("Разрешить повтор запросов с неизвестным результатом в следующем запуске", this);
+    chkS3UnknownRetry->setToolTip("Сервер мог уже выполнить и оплатить такой запрос. Разрешение не сохраняется между запусками.");
+    s3->addRow(chkS3UnknownRetry);
+    auto* importMap = new QPushButton("Использовать карту из старых логов…", this);
+    s3->addRow(importMap);
+    connect(importMap, &QPushButton::clicked, this, [this]() {
+        const auto directory = QFileDialog::getExistingDirectory(this, "Папка запуска с event_map.json и run.json");
+        if (directory.isEmpty()) return;
+        Manager->setImportLogDirectory(directory);
+        cbS3RunMode->setCurrentIndex(1);
+        appendLog("При следующем запуске V3 проверю и импортирую карту: " + directory);
+    });
 
     QPushButton* saveBtn = new QPushButton("Сохранить настройки", this);
     connect(saveBtn, &QPushButton::clicked, this, [this]() {
@@ -554,6 +575,9 @@ void MainWindow::loadSettingsToUi()
     chkS3QuoteCheck->setChecked(s.s3QuoteCheck);
     spS3MinScore->setValue(int(s.s3MinScore));
     spS3MinClip->setValue(int(s.s3MinClipSec));
+    cbS3RunMode->setCurrentIndex(int(s.s3RunMode));
+    spS3Requests->setValue(s.s3RequestLimit);
+    chkS3Partial->setChecked(s.s3AllowPartial);
     spS3MaxClip->setValue(int(s.s3MaxClipSec));
     spS3MaxSpan->setValue(int(s.s3MaxSpanSec));
     spS3MaxSegments->setValue(s.s3MaxSegments);
@@ -636,6 +660,10 @@ void MainWindow::saveSettingsFromUi()
     s.s3QuoteCheck = chkS3QuoteCheck->isChecked();
     s.s3MinScore = spS3MinScore->value();
     s.s3MinClipSec = spS3MinClip->value();
+    s.s3RunMode = AppSettings::StoryRunMode(cbS3RunMode->currentIndex());
+    s.s3RequestLimit = spS3Requests->value();
+    s.s3AllowPartial = chkS3Partial->isChecked();
+    s.s3AllowUnknownRetry = chkS3UnknownRetry->isChecked();
     s.s3MaxClipSec = spS3MaxClip->value();
     s.s3MaxSpanSec = spS3MaxSpan->value();
     s.s3MaxSegments = spS3MaxSegments->value();

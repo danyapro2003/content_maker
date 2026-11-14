@@ -48,6 +48,11 @@ LlmTransport::LlmTransport(const RetryPolicy& policy, QObject* parent)
 
 LlmTransport::~LlmTransport() { cancel(); }
 
+void LlmTransport::resetBudget(int maximumPosts)
+{
+    m_maxPosts = qMax(0, maximumPosts); m_posts = 0; m_unknownOutcomes = 0; m_knownTokens = 0;
+}
+
 void LlmTransport::cancel()
 {
     m_retryTimer.stop();
@@ -118,6 +123,14 @@ void LlmTransport::send(const QNetworkRequest& request, const QJsonObject& body,
 void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
 {
     if (m_pending != pending) return;
+    if (m_maxPosts > 0 && m_posts >= m_maxPosts) {
+        m_pending.reset();
+        const QString error = QString("REQUEST_BUDGET_EXHAUSTED: использовано %1/%2 API-запросов; состояние сохранено.")
+            .arg(m_posts).arg(m_maxPosts);
+        saveJson(pending->logDirectory, pending->prefix + ".budget_exhausted.json",
+            {{"stage", pending->stage}, {"posts", m_posts}, {"limit", m_maxPosts}});
+        pending->completion(false, error, pending->prefix); return;
+    }
     const int number = ++pending->attempts;
     const QString prefix = pending->prefix + (number == 1 ? QString()
         : QString("_attempt_%1").arg(number, 2, 10, QChar('0')));
@@ -131,6 +144,7 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
 
     QElapsedTimer elapsed;
     elapsed.start();
+    ++m_posts;
     auto* reply = m_network.post(pending->request, pending->payload);
     m_reply = reply;
     const auto received = std::make_shared<QByteArray>();
@@ -186,7 +200,8 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
         }
         const bool temporary = status == 408 || status == 429 || status == 500
             || status == 502 || status == 503 || status == 504;
-        const qint64 delay = !ok && temporary && !outcomeUnknown && !pending->cancelled
+        const bool budgetExhausted = m_maxPosts > 0 && m_posts >= m_maxPosts;
+        const qint64 delay = !ok && temporary && !outcomeUnknown && !pending->cancelled && !budgetExhausted
             ? retryDelayMs(m_policy, number, retryAfter, QDateTime::currentDateTimeUtc()) : -1;
         saveJson(pending->logDirectory, prefix + ".response.json", {
             {"ok", ok}, {"stage", pending->stage}, {"request_id", pending->prefix}, {"attempt", number},
@@ -199,6 +214,17 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
             {"retry_delay_ms", double(delay)}, {"error", reason},
             {"response", document.isObject() ? QJsonValue(document.object()) : QJsonValue(QString::fromUtf8(raw))}});
         saveBytes(pending->logDirectory, prefix + ".response.txt", content.toUtf8());
+        if (m_pending == pending) {
+            const auto usage = document.object()["usage"].toObject();
+            if (usage["total_tokens"].isDouble() && usage["total_tokens"].toDouble() >= 0)
+                m_knownTokens += usage["total_tokens"].toDouble();
+            if (outcomeUnknown) ++m_unknownOutcomes;
+            saveJson(pending->logDirectory, "request_budget.json", {{"posts", m_posts}, {"limit", m_maxPosts},
+                {"known_total_tokens", m_knownTokens}, {"unknown_outcomes", m_unknownOutcomes}});
+            emit attemptFinished({{"request_id", pending->prefix}, {"stage", pending->stage},
+                {"attempt", number}, {"ok", ok}, {"outcome_unknown", outcomeUnknown},
+                {"usage", usage}, {"server_request_id", QString::fromUtf8(reply->rawHeader("x-request-id"))}});
+        }
         reply->deleteLater();
         if (m_pending != pending) return;
         m_reply.clear();
@@ -210,6 +236,7 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
             return;
         }
         if (!ok) {
+            if (budgetExhausted) content += QString("\nREQUEST_BUDGET_EXHAUSTED: использовано %1/%2 API-запросов.").arg(m_posts).arg(m_maxPosts);
             if (temporary && number >= m_policy.maxAttempts)
                 content += QString("\nИсчерпаны попытки LLM (%1/%2). ").arg(number).arg(m_policy.maxAttempts);
             else if (temporary && retryAfterMs(retryAfter, QDateTime::currentDateTimeUtc()) > m_policy.maxRetryAfterMs)
