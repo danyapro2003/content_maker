@@ -33,6 +33,20 @@ QString transcript(const QList<S3Phrase>& phrases)
     return text;
 }
 
+QString packedTranscript(const QList<S3Phrase>& phrases)
+{
+    QString packed;
+    for (const auto& p : phrases) {
+        packed += QString("P%1 [%2-%3] ").arg(p.id, 6, 10, QChar('0')).arg(p.startSec, 0, 'f', 2).arg(p.endSec, 0, 'f', 2);
+        if (!p.speaker.isEmpty()) packed += p.speaker + " ";
+        packed += p.text;
+        if (p.uncertain) packed += "  ?";
+        if (p.flagCheck) packed += "  [проверить]";
+        packed += "\n";
+    }
+    return packed;
+}
+
 QString indexPrompt(const QList<S3Phrase>& phrases, int chunk)
 {
     return QStringLiteral(

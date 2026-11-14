@@ -111,5 +111,6 @@ private:
     QSpinBox* spS3Requests = nullptr;
     QCheckBox* chkS3Partial = nullptr;
     QCheckBox* chkS3UnknownRetry = nullptr;
+    QWidget* m_settingsContent = nullptr;
 };
 #endif // MAINWINDOW_H

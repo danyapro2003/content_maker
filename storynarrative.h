@@ -7,6 +7,7 @@
 namespace StoryNarrative {
 QList<QList<S3Phrase>> chunks(const QList<S3Phrase>& phrases, int maxChars = 14000);
 QString transcript(const QList<S3Phrase>& phrases);
+QString packedTranscript(const QList<S3Phrase>& phrases);
 QString indexPrompt(const QList<S3Phrase>& phrases, int chunk);
 struct EventCheck {
     QJsonArray accepted, rejected, corrections;

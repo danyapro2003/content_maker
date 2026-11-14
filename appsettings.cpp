@@ -89,9 +89,9 @@ static AppSettings::DiarEngine strToDiar(const QString& s)
     return AppSettings::DiarEngine::SherpaOnnx;
 }
 
-bool AppSettings::load()
+bool AppSettings::load(const QString& path)
 {
-    QFile f(settingsFilePath());
+    QFile f(path.isEmpty() ? settingsFilePath() : path);
     if (!f.open(QIODevice::ReadOnly))
         return false;
 

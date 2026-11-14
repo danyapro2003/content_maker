@@ -16,7 +16,7 @@
 #include "stories3pipeline.h"
 
 struct FileRunResult {
-    QString source, status, error, logDirectory;
+    QString source, status, error, logDirectory, outputDirectory;
     int considered = 0, accepted = 0, rejected = 0, renderedStories = 0, expectedVideos = 0;
     QStringList outputs;
     QJsonObject json() const;
@@ -134,6 +134,7 @@ private:
     QString outDir;     // <папка_видео>/<basename>_clips
     QString tempDir;    // outDir/temp
     QString m_runLogDirectory;
+    QString m_runOutputDirectory, m_renderTempDirectory;
     QString m_runError;
     QStringList m_runOutputs;
     MediaInfo currentInfo;

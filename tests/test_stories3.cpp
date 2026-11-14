@@ -24,6 +24,8 @@ void testStoryProtocol();
 void testStoryRunStore();
 void testStoryTimeline();
 void testStoryContext();
+void checkLiveModel(const QString&, const QString&);
+void liveV3Run(const QStringList&);
 void replayV3Run(const QString&, const QString&);
 void replayEventIndex(const QString& directory, const QString& packedPath);
 
@@ -71,6 +73,7 @@ public:
     int plans = 0;
     int reviews = 0;
     bool invalidEdits = false;
+    int invalidBranch = 0;
     bool omitRequired = false;
     bool viewerFailOnce = false;
     bool viewerAlwaysFails = false;
@@ -174,10 +177,10 @@ public:
                         const auto match = QRegularExpression("\\\"branch_id\\\"\\s*:\\s*\\\"?B?(\\d+)").match(user);
                         const int branch = match.hasMatch() ? match.captured(1).toInt() : 1;
                         auto stories = storyJson(label, branch);
-                        if (invalidEdits || omitRequired) {
+                        if (invalidEdits || omitRequired || invalidBranch == branch) {
                             auto story = stories[0].toObject(); auto segments = story["segments"].toArray();
                             auto broken = segments[1].toObject();
-                            if (invalidEdits) broken["end_phrase"] = 99999;
+                            if (invalidEdits || invalidBranch == branch) broken["end_phrase"] = 99999;
                             if (omitRequired) { broken["start_phrase"] = idsForMissing(branch); broken["end_phrase"] = idsForMissing(branch); }
                             segments[1] = broken; story["segments"] = segments; stories[0] = story;
                         }
@@ -215,6 +218,13 @@ public:
 static bool fakeTool(const QStringList& args)
 {
     if (args.contains("-show_streams")) {
+        if (args.last().endsWith(".part.mp4")) {
+            const auto fixture = QJsonDocument::fromJson(readFile(args.last())).object();
+            const double duration = fixture["duration"].toDouble() + (qEnvironmentVariableIsSet("CLIPPER_TEST_BAD_PROBE") ? 100 : 0);
+            const QJsonObject probe{{"format", QJsonObject{{"duration", duration}}}, {"streams", QJsonArray{
+                QJsonObject{{"codec_type", "video"}, {"avg_frame_rate", "25/1"}}, QJsonObject{{"codec_type", "audio"}}}}};
+            QTextStream(stdout) << QJsonDocument(probe).toJson(QJsonDocument::Compact); return true;
+        }
         const QJsonObject probe{{"format", QJsonObject{{"duration", "7200"}}},
             {"streams", QJsonArray{
                 QJsonObject{{"index", 0}, {"codec_type", "video"}},
@@ -235,7 +245,13 @@ static bool fakeTool(const QStringList& args)
             require(!filter.contains("force_style="), "old style overrode V3 ASS subtitles");
             require(!filter.contains("acrossfade="), "V3 dialogue was overlapped by a crossfade");
         }
-        writeFile(args.last(), "offline media fixture");
+        if (args.last().endsWith(".part.mp4")) {
+            if (qEnvironmentVariableIsSet("CLIPPER_TEST_FAIL_EN") && args.last().contains("/en/"))
+                throw std::runtime_error("scripted EN render failure");
+            double duration = 0;
+            for (int i = 0; i + 1 < args.size(); ++i) if (args[i] == "-t") duration += args[i + 1].toDouble();
+            writeFile(args.last(), QJsonDocument(QJsonObject{{"duration", duration}}).toJson());
+        } else writeFile(args.last(), "offline media fixture");
         return true;
     }
     return false;
@@ -535,16 +551,21 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
     require(errors.isEmpty(), "queue failed");
     for (const QString name : {QString("alpha"), QString("beta")}) {
         const auto base = temporary.filePath(name + "_clips");
-        const auto ru = readFile(base + "/temp/story_1_ru.s3.srt");
+        const auto manifest = QJsonDocument::fromJson(readFile(base + "/latest_outputs.json")).object();
+        const auto outputs = manifest["output_directory"].toString();
+        const auto renderTemp = base + "/temp/runs/" + QFileInfo(outputs).fileName();
+        require(manifest["status"] == "completed" && manifest["rendered_stories"] == 2 && manifest["created_videos"] == 4,
+                "output manifest counts language versions as stories");
+        const auto ru = readFile(renderTemp + "/story_1_ru.s3.srt");
         require(ru.contains(name.toUpper().toUtf8()), "previous movie leaked into subtitles");
         require(!ru.contains(name == "alpha" ? "BETA" : "ALPHA"), "foreign movie words found");
-        require(readFile(base + "/temp/story_1_en.srt").contains("en_OWN_AUDIO"),
+        require(readFile(renderTemp + "/story_1_en.srt").contains("en_OWN_AUDIO"),
                 "English version reused Russian transcript");
-        require(QFileInfo::exists(base + "/ru/story_01.mp4") && QFileInfo::exists(base + "/en/story_01.mp4"),
+        require(QFileInfo::exists(outputs + "/ru/story_01.mp4") && QFileInfo::exists(outputs + "/en/story_01.mp4"),
                 "missing render task output");
-        require(QFileInfo::exists(base + "/ru/story_02.mp4") && QFileInfo::exists(base + "/en/story_02.mp4"),
+        require(QFileInfo::exists(outputs + "/ru/story_02.mp4") && QFileInfo::exists(outputs + "/en/story_02.mp4"),
                 "second distinct story was not rendered");
-        const auto saved = QJsonDocument::fromJson(readFile(base + "/stories.json")).array();
+        const auto saved = QJsonDocument::fromJson(readFile(outputs + "/stories.json")).array();
         require(saved.size() == 2, "saved EDL contains only one story");
         const auto json = saved.first().toObject();
         require(json["segments"].toArray().first().toObject()["beat"].toString().toLower() == "hook",
@@ -557,11 +578,13 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
     require(readFile(temporary.filePath("alpha_clips/temp/asr_calls.txt")) == "2",
             "changed ASR settings reused old transcript");
     require(mock.plans == 4 && mock.reviews == 8 && mock.fidelities == 8, "narrative stages skipped in queue");
-    const auto originalEdl = readFile(temporary.filePath("alpha_clips/stories.json"));
+    const auto previousOutputs = QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_outputs.json"))).object();
+    const auto originalEdlPath = previousOutputs["output_directory"].toString() + "/stories.json";
+    const auto originalEdl = readFile(originalEdlPath);
     mock.invalidEdits = true;
     manager.addFilesToQueue({alpha}); queueLoop.exec();
     require(!errors.isEmpty(), "failed rerun was reported as successful");
-    require(readFile(temporary.filePath("alpha_clips/stories.json")) == originalEdl,
+    require(readFile(originalEdlPath) == originalEdl,
             "failed rerun replaced old EDL");
     require(readFile(temporary.filePath("alpha_clips/temp/asr_calls.txt")) == "2",
             "LLM-only rerun unnecessarily repeated ASR");
@@ -572,6 +595,26 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
     require(readFile(failedRun.filePath("result.json")).contains("failed")
             && !failedRun.entryList({"*.response.txt"}, QDir::Files).isEmpty(),
             "failed run lost its status or raw LLM responses");
+    require(QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_outputs.json"))).object() == previousOutputs,
+            "failed run replaced latest successful output pointer");
+    mock.invalidEdits = false; mock.invalidBranch = 2;
+    manager.addFilesToQueue({alpha}); queueLoop.exec();
+    auto partial = QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_attempt.json"))).object();
+    require(partial["status"] == "partial" && partial["accepted_stories"] == 1 && partial["created_videos"] == 2,
+            "one accepted story lost because another failed");
+    mock.invalidBranch = 0;
+    qputenv("CLIPPER_TEST_FAIL_EN", "1");
+    manager.addFilesToQueue({alpha}); queueLoop.exec();
+    qunsetenv("CLIPPER_TEST_FAIL_EN");
+    partial = QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_attempt.json"))).object();
+    require(partial["status"] == "partial" && partial["rendered_stories"] == 2 && partial["created_videos"] == 2,
+            "EN failure discarded successful RU outputs or blocked next story");
+    qputenv("CLIPPER_TEST_BAD_PROBE", "1");
+    manager.addFilesToQueue({alpha}); queueLoop.exec();
+    qunsetenv("CLIPPER_TEST_BAD_PROBE");
+    const auto badProbe = QJsonDocument::fromJson(readFile(temporary.filePath("alpha_clips/latest_attempt.json"))).object();
+    require(badProbe["status"] == "failed" && badProbe["outputs"].toArray().isEmpty(),
+            "invalid video/part file reported as ready output");
     QTextStream(stdout) << "PASS: quote evidence, complete branches, cache dependencies, "
                           "plan/edit/review, two-file queue, language-specific subtitles, saved EDL" << Qt::endl;
 }
@@ -589,6 +632,14 @@ int main(int argc, char** argv)
         if (app.arguments().contains("--replay-v3-run")) {
             require(argc == 4, "--replay-v3-run log-directory packed-transcript.md");
             replayV3Run(app.arguments()[2], app.arguments()[3]); return 0;
+        }
+        if (app.arguments().contains("--check-live-model")) {
+            require(argc == 4, "--check-live-model settings.json log-directory");
+            checkLiveModel(app.arguments()[2], app.arguments()[3]); return 0;
+        }
+        if (app.arguments().contains("--live-v3")) {
+            require(argc == 8, "--live-v3 settings.json source packed.md import-log-dir-or-dash output-dir count");
+            liveV3Run(app.arguments()); return 0;
         }
         if (app.arguments().contains("--compose")) {
             require(argc == 4, "--compose input.srt output.ass");

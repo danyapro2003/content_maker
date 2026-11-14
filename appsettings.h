@@ -10,7 +10,7 @@ public:
 
     static AppSettings& instance();
 
-    bool load();
+    bool load(const QString& path = QString());
     bool save() const;
     QString settingsFilePath() const;
 

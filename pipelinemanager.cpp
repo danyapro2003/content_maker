@@ -17,11 +17,13 @@
 #include <QDateTime>
 #include <QUuid>
 #include <QTimer>
+#include <QSaveFile>
+#include <QRegularExpression>
 #include <algorithm>
 
 QJsonObject FileRunResult::json() const
 {
-    return {{"source", source}, {"status", status}, {"error", error}, {"log_directory", logDirectory},
+    return {{"source", source}, {"status", status}, {"error", error}, {"log_directory", logDirectory}, {"output_directory", outputDirectory},
         {"considered_stories", considered}, {"accepted_stories", accepted}, {"rejected_stories", rejected},
         {"rendered_stories", renderedStories}, {"expected_videos", expectedVideos},
         {"created_videos", outputs.size()}, {"outputs", QJsonArray::fromStringList(outputs)}};
@@ -40,6 +42,13 @@ QString QueueRunSummary::text() const
     return QString("Очередь завершена: файлов %1, успешно %2, частично %3, с ошибками %4. "
                    "Новых историй: %5. Новых видеофайлов: %6.")
         .arg(files.size()).arg(completed).arg(partial).arg(failed).arg(stories).arg(outputs().size());
+}
+
+static bool writeResultJson(const QString& path, const QJsonObject& result)
+{
+    QSaveFile file(path);
+    const auto bytes = QJsonDocument(result).toJson(QJsonDocument::Indented);
+    return file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit();
 }
 
 PipelineManager::PipelineManager(QObject *parent) : QObject(parent)
@@ -109,8 +118,22 @@ void PipelineManager::onErrorOccurred(const QString& errorMessage)
         return;
     }
 
-    m_runError = errorMessage;
+    m_runError += (m_runError.isEmpty() ? QString() : "\n") + errorMessage;
     emit logMessage("[ОШИБКА] " + errorMessage);
+    if (m_mode == Mode::Stories3 && m_taskIndex >= 0 && m_taskIndex < m_renderTasks.size()) {
+        const bool fatal = errorMessage.contains(QRegularExpression(
+            "no space left|not enough space|недостаточно места|Не удалось запустить", QRegularExpression::CaseInsensitiveOption));
+        if (!fatal) {
+            emit logMessage("Эта версия не создана. Уже готовые видео сохранены; продолжаю следующие задачи.");
+            ++m_taskIndex; m_audioPurpose = AudioPurpose::None;
+            QTimer::singleShot(0, this, &PipelineManager::processNextRenderTask); return;
+        }
+        while (!m_fileQueue.isEmpty()) {
+            FileRunResult skipped; skipped.source = m_fileQueue.dequeue(); skipped.status = "failed";
+            skipped.error = "Очередь остановлена из-за общей ошибки рендера: " + errorMessage;
+            m_queueSummary.files.append(skipped);
+        }
+    }
     emit logMessage("Файл пропущен: " + currentFilePath);
     finishCurrentFile();
 }
@@ -160,6 +183,13 @@ void PipelineManager::startPipeline(const QString& path)
         + QUuid::createUuid().toString(QUuid::Id128).left(8);
     QDir().mkpath(m_runLogDirectory);
     m_fileResult.logDirectory = m_runLogDirectory;
+    const auto runId = QFileInfo(m_runLogDirectory).fileName();
+    m_runOutputDirectory = m_mode == Mode::Stories3 ? outDir + "/runs/" + runId : outDir;
+    m_renderTempDirectory = m_mode == Mode::Stories3 ? tempDir + "/runs/" + runId : tempDir;
+    QDir().mkpath(m_runOutputDirectory); QDir().mkpath(m_renderTempDirectory);
+    m_fileResult.outputDirectory = m_runOutputDirectory;
+    if (m_mode == Mode::Stories3)
+        writeResultJson(outDir + "/latest_attempt.json", {{"status", "running"}, {"output_directory", m_runOutputDirectory}, {"log_directory", m_runLogDirectory}});
     m_runError.clear();
     m_runOutputs.clear();
     llm.setRunLogDirectory(m_runLogDirectory);
@@ -840,22 +870,24 @@ void PipelineManager::onStoriesFound(const QList<StoryClip>& stories, const QJso
 
     emit logMessage(QString("LLM создала %1 пересказов (после снаппинга: %2).")
                         .arg(stories.size()).arg(m_stories.size()));
-    if (m_stories.isEmpty() || (m_mode == Mode::Stories3 && m_stories.size() < s.minClips)) {
+    if (m_stories.isEmpty() || (m_mode == Mode::Stories3 && m_stories.size() < s.minClips && !s.s3AllowPartial)) {
         onErrorOccurred("Не осталось пересказов с допустимой длительностью.");
         return;
     }
+    if (m_mode == Mode::Stories3 && m_stories.size() < s.minClips)
+        m_runError = QString("Частичный результат: %1 историй из требуемых %2.").arg(m_stories.size()).arg(s.minClips);
     emit storiesFound(m_stories);
     llm.writeRunArtifact("final_edl.json", {{"stories", LlmClient::serializeStories(m_stories)}});
 
     // сохраняем метаданные + отдельные txt с подписями для постов
-    QFile f(outDir + "/stories.json");
+    QFile f(m_runOutputDirectory + "/stories.json");
     if (f.open(QIODevice::WriteOnly)) {
         f.write(QJsonDocument(m_mode == Mode::Stories3
                     ? LlmClient::serializeStories(m_stories) : rawJson).toJson(QJsonDocument::Indented));
         f.close();
     }
     for (int i = 0; i < m_stories.size(); ++i) {
-        QFile txt(outDir + QString("/story_%1_caption.txt").arg(i + 1, 2, 10, QChar('0')));
+        QFile txt(m_runOutputDirectory + QString("/story_%1_caption.txt").arg(i + 1, 2, 10, QChar('0')));
         if (txt.open(QIODevice::WriteOnly)) {
             txt.write(m_stories[i].caption.toUtf8());
             txt.close();
@@ -945,7 +977,7 @@ void PipelineManager::buildStoryRenderTasks()
                                     .arg(i + 1).arg(l.lang));
                 continue;
             }
-            QString langDir = outDir + "/" + l.lang;
+            QString langDir = m_runOutputDirectory + "/" + l.lang;
             QDir().mkpath(langDir);
 
             RenderTask t;
@@ -958,8 +990,8 @@ void PipelineManager::buildStoryRenderTasks()
             t.startSec = story.segments.first().startSec;
             t.endSec = story.segments.last().endSec;
             t.audioIndex = l.audioIndex;
-            t.wavPath = tempDir + QString("/story_%1_%2.wav").arg(i + 1).arg(l.lang);
-            t.srtBase = tempDir + QString("/story_%1_%2").arg(i + 1).arg(l.lang);
+            t.wavPath = m_renderTempDirectory + QString("/story_%1_%2.wav").arg(i + 1).arg(l.lang);
+            t.srtBase = m_renderTempDirectory + QString("/story_%1_%2").arg(i + 1).arg(l.lang);
             t.outPath = langDir + QString("/story_%1.mp4").arg(i + 1, 2, 10, QChar('0'));
             m_renderTasks.append(t);
         }
@@ -969,7 +1001,7 @@ void PipelineManager::buildStoryRenderTasks()
 void PipelineManager::processNextRenderTask()
 {
     if (m_taskIndex >= m_renderTasks.size()) {
-        emit logMessage("Все клипы отрендерены.");
+        emit logMessage(QString("Задачи рендера завершены: создано %1 из %2 видео.").arg(m_runOutputs.size()).arg(m_renderTasks.size()));
         finishCurrentFile();
         return;
     }
@@ -1111,12 +1143,12 @@ void PipelineManager::renderTaskWithSrt(const QString& srtPath)
                             .arg(task.clipIndex + 1).arg(task.lang));
         renderer.renderStoryClip(currentFilePath, task.segments, task.audioIndex,
                                  subtitlePath, task.outPath,
-                                  storyTransitionSec());
+                                  storyTransitionSec(), m_mode == Mode::Stories3);
     } else {
         emit logMessage(QString("Рендер клипа %1 [%2]...")
                             .arg(task.clipIndex + 1).arg(task.lang));
         renderer.renderClip(currentFilePath, task.startSec, task.endSec, task.audioIndex,
-                            subtitlePath, task.outPath);
+                            subtitlePath, task.outPath, m_mode == Mode::Stories3);
     }
 }
 
@@ -1147,6 +1179,13 @@ void PipelineManager::finishCurrentFile()
     auto result = m_fileResult.json();
     result["finished_utc"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
     llm.writeRunArtifact("result.json", result);
+    if (m_mode == Mode::Stories3) {
+        const bool saved = writeResultJson(m_runOutputDirectory + "/result.json", result)
+            && writeResultJson(outDir + "/latest_attempt.json", result);
+        if (!saved) emit logMessage("[ПРЕДУПРЕЖДЕНИЕ] Не удалось сохранить манифест результата; проверь logs/result.json.");
+        if (!m_runOutputs.isEmpty() && !writeResultJson(outDir + "/latest_outputs.json", result))
+            emit logMessage("[ПРЕДУПРЕЖДЕНИЕ] Не удалось обновить latest_outputs.json; пути готовых файлов указаны в логах.");
+    }
     m_queueSummary.files.append(m_fileResult);
     emit logMessage(QString("Результат файла: %1. Новых историй: %2, видео: %3. %4")
         .arg(m_fileResult.status).arg(m_fileResult.renderedStories).arg(m_runOutputs.size()).arg(m_runError));

@@ -36,6 +36,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(Manager, &PipelineManager::storiesFound, this, &MainWindow::fillStoriesTable);
     connect(Manager, &PipelineManager::queueFinished, this, [this]() {
         ui->start_pb->setEnabled(true);
+        ui->mode_cb->setEnabled(true);
+        if (m_settingsContent) m_settingsContent->setEnabled(true);
         if (chkS3UnknownRetry) chkS3UnknownRetry->setChecked(false);
         AppSettings::instance().s3AllowUnknownRetry = false;
     });
@@ -55,7 +57,7 @@ MainWindow::MainWindow(QWidget *parent)
             statusBar()->showMessage(summary.text());
             openOutputs->setEnabled(!summary.outputs().isEmpty());
             openLogs->setEnabled(!summary.files.isEmpty());
-            if (!summary.outputs().isEmpty()) openOutputs->setProperty("directory", QFileInfo(summary.outputs().last()).absolutePath());
+            for (const auto& file : summary.files) if (!file.outputs.isEmpty()) openOutputs->setProperty("directory", file.outputDirectory);
             if (!summary.files.isEmpty()) openLogs->setProperty("directory", summary.files.last().logDirectory);
         });
 
@@ -178,6 +180,8 @@ void MainWindow::on_start_pb_clicked()
 
     appendLog(QString("В очередь добавлено файлов: %1").arg(filesToProcess.size()));
     ui->start_pb->setEnabled(false);
+    ui->mode_cb->setEnabled(false);
+    if (m_settingsContent) m_settingsContent->setEnabled(false);
     Manager->addFilesToQueue(filesToProcess);
 }
 
@@ -512,6 +516,7 @@ void MainWindow::buildSettingsTab()
 
     // настроек много — общий контейнер с прокруткой
     QWidget* content = new QWidget(this);
+    m_settingsContent = content;
     QVBoxLayout* outer = new QVBoxLayout(content);
     outer->addLayout(form);
     outer->addWidget(s3Box);

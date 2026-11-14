@@ -1,3 +1,4 @@
+#include "storynarrative.h"
 /* stories3pipeline.cpp */
 
 #include "stories3pipeline.h"
@@ -314,22 +315,7 @@ void Stories3Pipeline::startLlm()
     }
     m_phrases = phrases;
 
-    // собираем markdown обратно в текст для LLM (как в v2, но с новыми метками)
-    QString packed;
-    packed.reserve(phrases.size() * 70);
-    for (const S3Phrase& p : phrases) {
-        packed += QString("P%1 [%2-%3] ").arg(p.id, 6, 10, QChar('0'))
-                      .arg(p.startSec, 0, 'f', 2)
-                      .arg(p.endSec, 0, 'f', 2);
-        if (!p.speaker.isEmpty())
-            packed += p.speaker + " ";
-        packed += p.text;
-        if (p.uncertain)
-            packed += "  ?";
-        if (p.flagCheck)
-            packed += "  [проверить]";
-        packed += "\n";
-    }
+    const QString packed = StoryNarrative::packedTranscript(phrases);
 
     emit logMessage(QString("Пересказ 3.0: транскрипт для LLM — %1 фраз, %2 символов.")
                         .arg(phrases.size())

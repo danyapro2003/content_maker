@@ -99,7 +99,7 @@ option(CONTENT_CLIPPER_BUILD_TESTS "Build V3 regression tests" OFF)
 if(CONTENT_CLIPPER_BUILD_TESTS)
     enable_testing()
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
-    add_executable(test_stories3 tests/test_stories3.cpp tests/test_eventindex.cpp tests/test_storyprotocol.cpp tests/test_storyrunstore.cpp tests/test_storytimeline.cpp tests/test_storycontext.cpp tests/replay_v3_run.cpp
+    add_executable(test_stories3 tests/test_stories3.cpp tests/test_eventindex.cpp tests/test_storyprotocol.cpp tests/test_storyrunstore.cpp tests/test_storytimeline.cpp tests/test_storycontext.cpp tests/replay_v3_run.cpp tests/live_v3_run.cpp
         appsettings.cpp llmclient.cpp llmtransport.cpp storynarrative.cpp storytypes.h storyprotocol.cpp storyprotocol.h storyrunstore.cpp storyrunstore.h storytimeline.cpp storytimeline.h storycontext.cpp storycontext.h eventindex.cpp s3cache.cpp stories3runner.cpp stories3pipeline.cpp
         pipelinemanager.cpp mediaextractor.cpp metadataparser.cpp whisperrunner.cpp
         cliprenderer.cpp srtutils.cpp subtitlecomposer.cpp transcriptpacker.cpp diarizerunner.cpp)

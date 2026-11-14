@@ -5,36 +5,88 @@
 #include <QProcess>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QTimer>
+#include <cmath>
 
 ClipRenderer::ClipRenderer() {}
 
-void ClipRenderer::startFfmpeg(const QStringList& args, const QString& workDir, const QString& outPath)
+void ClipRenderer::startFfmpeg(const QStringList& arguments, const QString& workDir, const QString& outPath,
+                               double expectedDuration, int segments, bool verifyOutput)
 {
-    m_currentOutPath = outPath;
-
-    QProcess* proc = new QProcess(this);
-    if (!workDir.isEmpty())
-        proc->setWorkingDirectory(workDir);
-
+    const QString temporaryPath = verifyOutput ? outPath.left(outPath.size() - 4) + ".part.mp4" : outPath;
+    if (verifyOutput && QFileInfo::exists(outPath)) {
+        emit errorOccurred("Готовый результат уже существует; нужен новый каталог запуска: " + outPath); return;
+    }
+    QStringList args = arguments;
+    args.last() = temporaryPath;
+    auto* proc = new QProcess(this);
+    if (!workDir.isEmpty()) proc->setWorkingDirectory(workDir);
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart || proc->property("reported").toBool()) return;
+        proc->setProperty("reported", true);
+        emit errorOccurred("Не удалось запустить ffmpeg: " + proc->errorString()); proc->deleteLater();
+    });
     connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [=](int exitCode, QProcess::ExitStatus exitStatus) {
-                bool ok = (exitStatus == QProcess::NormalExit && exitCode == 0
-                           && QFile::exists(m_currentOutPath));
-                if (ok) {
-                    emit clipRendered(m_currentOutPath);
-                } else {
-                    emit errorOccurred(QString("Ошибка ffmpeg при рендере клипа (код %1): %2")
-                                           .arg(exitCode)
-                                           .arg(QString::fromLocal8Bit(proc->readAllStandardError())));
-                }
-                proc->deleteLater();
-            });
-
+        [this, proc, temporaryPath, outPath, expectedDuration, segments, verifyOutput](int code, QProcess::ExitStatus status) {
+            if (proc->property("reported").toBool()) return;
+            proc->setProperty("reported", true);
+            if (status != QProcess::NormalExit || code != 0 || !QFileInfo(temporaryPath).isFile() || QFileInfo(temporaryPath).size() <= 0)
+                emit errorOccurred(QString("Ошибка ffmpeg при рендере (код %1): %2").arg(code)
+                    .arg(QString::fromLocal8Bit(proc->readAllStandardError())));
+            else if (verifyOutput) verifyAndPublish(temporaryPath, outPath, expectedDuration, segments);
+            else emit clipRendered(outPath);
+            proc->deleteLater();
+        });
     proc->start(AppSettings::instance().ffmpegPath, args);
 }
 
+void ClipRenderer::verifyAndPublish(const QString& temporaryPath, const QString& outPath, double expectedDuration, int segments)
+{
+    auto* probe = new QProcess(this);
+    auto* timeout = new QTimer(probe); timeout->setSingleShot(true);
+    connect(timeout, &QTimer::timeout, probe, [probe]() { probe->setProperty("timeout", true); probe->kill(); });
+    connect(probe, &QProcess::errorOccurred, this, [this, probe](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart || probe->property("reported").toBool()) return;
+        probe->setProperty("reported", true);
+        emit errorOccurred("Не удалось запустить ffprobe для проверки результата: " + probe->errorString()); probe->deleteLater();
+    });
+    connect(probe, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+        [this, probe, timeout, temporaryPath, outPath, expectedDuration, segments](int code, QProcess::ExitStatus status) {
+            timeout->stop();
+            if (probe->property("reported").toBool()) return;
+            probe->setProperty("reported", true);
+            const auto data = QJsonDocument::fromJson(probe->readAllStandardOutput()).object();
+            const auto durationValue = data["format"].toObject()["duration"];
+            const double duration = durationValue.isDouble() ? durationValue.toDouble() : durationValue.toString().toDouble();
+            bool video = false, audio = false; double fps = 24;
+            for (const auto& value : data["streams"].toArray()) {
+                const auto stream = value.toObject();
+                if (stream["codec_type"] == "audio") audio = true;
+                if (stream["codec_type"] == "video") {
+                    video = true; const auto ratio = stream["avg_frame_rate"].toString().split('/');
+                    if (ratio.size() == 2 && ratio[1].toDouble() > 0 && ratio[0].toDouble() > 0)
+                        fps = ratio[0].toDouble() / ratio[1].toDouble();
+                }
+            }
+            const double tolerance = .12 + qMax(1, segments) / qMax(1.0, fps);
+            if (status != QProcess::NormalExit || code != 0 || !video || !audio || !std::isfinite(duration)
+                || duration <= 0 || std::abs(duration - expectedDuration) > tolerance) {
+                emit errorOccurred(QString("VERIFY_OUTPUT_FAILED: ожидалось %1 с, получено %2 с; файл остался .part.mp4: %3")
+                    .arg(expectedDuration, 0, 'f', 3).arg(duration, 0, 'f', 3).arg(temporaryPath));
+            } else if (!QFile::rename(temporaryPath, outPath)) {
+                emit errorOccurred("Не удалось сохранить проверенное видео: " + outPath);
+            } else emit clipRendered(outPath);
+            probe->deleteLater();
+        });
+    probe->start(AppSettings::instance().ffprobePath, {"-v", "error", "-print_format", "json", "-show_format", "-show_streams", temporaryPath});
+    timeout->start(30000);
+}
+
 void ClipRenderer::renderClip(const QString& inputPath, double startSec, double endSec,
-                              int audioIndex, const QString& srtPath, const QString& outPath)
+                              int audioIndex, const QString& srtPath, const QString& outPath, bool verifyOutput)
 {
     double dur = endSec - startSec;
     if (dur <= 0.0)
@@ -75,12 +127,12 @@ void ClipRenderer::renderClip(const QString& inputPath, double startSec, double 
          << "-movflags" << "+faststart"
          << outPath;
 
-    startFfmpeg(args, workDir, outPath);
+    startFfmpeg(args, workDir, outPath, dur, 1, verifyOutput);
 }
 
 void ClipRenderer::renderStoryClip(const QString& inputPath, const QList<QPair<double, double>>& segments,
                                    int audioIndex, const QString& srtPath, const QString& outPath,
-                                   double crossfadeSec)
+                                   double crossfadeSec, bool verifyOutput)
 {
     if (segments.isEmpty()) {
         emit errorOccurred("renderStoryClip: пустой список сегментов");
@@ -173,5 +225,8 @@ void ClipRenderer::renderStoryClip(const QString& inputPath, const QList<QPair<d
          << "-movflags" << "+faststart"
          << outPath;
 
-    startFfmpeg(args, workDir, outPath);
+    double expectedDuration = 0;
+    for (const auto& segment : segments) expectedDuration += segment.second - segment.first;
+    if (useXfade) expectedDuration -= (segments.size() - 1) * crossfadeSec;
+    startFfmpeg(args, workDir, outPath, expectedDuration, segments.size(), verifyOutput);
 }
