@@ -32,6 +32,13 @@ void testStoryContext()
     first["depends_on"] = QJsonArray{"C3E3"}; chain[0] = first; cyclic["chain"] = chain;
     plan["primary"] = QJsonArray{cyclic};
     require(!StoryContext::plans(plan, events, units, 1, 3, 2, 30, 90, 40000).ok(), "causal dependency cycle accepted");
+    auto optionalCycle = branch; auto optionalChain = branch["chain"].toArray();
+    optionalChain.append(QJsonObject{{"event_id", "C2E2"}, {"function", "context"}, {"depends_on", QJsonArray{"C2E2"}}});
+    optionalCycle["chain"] = optionalChain; plan["primary"] = QJsonArray{optionalCycle};
+    require(!StoryContext::plans(plan, events, units, 1, 3, 2, 30, 90, 40000).ok(), "disconnected optional cycle accepted");
+    auto unknownOptional = branch; unknownOptional["optional_events"] = QJsonArray{"C99E99"};
+    plan["primary"] = QJsonArray{unknownOptional};
+    require(!StoryContext::plans(plan, events, units, 1, 3, 2, 30, 90, 40000).ok(), "unknown optional event accepted");
     QString error;
     require(StoryContext::unitsForReferences({{"purpose", "missing cause"}, {"phrase_ids", QJsonArray{9999}}}, events, units, error).isEmpty()
         && !error.isEmpty(), "context request escaped source IDs");

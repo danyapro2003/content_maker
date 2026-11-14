@@ -164,6 +164,12 @@ void LlmClient::sendChat(const QJsonArray& messages,
         req.setRawHeader("Authorization", "Bearer " + s.llmApiKey.toUtf8());
 
     const QString requestKey = m_story3Active ? stageCacheKey(messages) : QString();
+    if (m_offlinePreview) {
+        writeRunArtifact(prefix + ".preview_request.json", {{"stage", stage}, {"body", body},
+            {"url", req.url().toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery)}, {"sent", false}});
+        QTimer::singleShot(0, this, [callback]() { callback(false, "OFFLINE_PREVIEW: запрос сохранён локально, API не вызывался."); });
+        return;
+    }
     m_story3RequestKey = requestKey;
     if (m_story3Active && !m_story3Store.directory().isEmpty()) {
         const auto saved = m_story3Store.load("request", requestKey, false);
@@ -1022,7 +1028,8 @@ void LlmClient::runStoryTurnV3()
             const auto decoded = StoryProtocol::parseEdit(content, m_s3Phrases, m_story3Plan["branch_id"].toString());
             if (decoded.ok() && m_story3Phase == Story3Phase::Repair && decoded.value.protocolVersion == 2
                 && decoded.value.baseDraftHash != m_story3BaseDraftHash) {
-                if (m_story3FormatRepairs++ >= 1) { rejectStoryV3("STALE_DRAFT: неверный base_draft_hash после исправления формата."); return; }
+                if (m_story3FormatRepairs >= 1) { rejectStoryV3("STALE_DRAFT: неверный base_draft_hash после исправления формата."); return; }
+                ++m_story3FormatRepairs;
                 m_story3Messages.append(QJsonObject{{"role", "user"}, {"content", "STALE_DRAFT: добавь base_draft_hash: " + m_story3BaseDraftHash}});
                 runStoryTurnV3(); return;
             }
@@ -1085,8 +1092,9 @@ void LlmClient::runStoryTurnV3()
         }
         if (notes.isEmpty()) notes << "неверная структура ответа";
         writeRunArtifact(m_lastRequestPrefix + ".rejection.json", {{"accepted", false}, {"notes", QJsonArray::fromStringList(notes)}});
-        const bool canRetry = m_story3BranchIndex >= 0 ? m_story3FormatRepairs++ < 1 : !m_story3Retried;
+        const bool canRetry = m_story3BranchIndex >= 0 ? m_story3FormatRepairs < 1 : !m_story3Retried;
         if (canRetry) {
+            if (m_story3BranchIndex >= 0) ++m_story3FormatRepairs;
             m_story3Retried = true;
             saveStoryStateV3("format_error", {{"notes", QJsonArray::fromStringList(notes)}});
             m_story3Messages.append(QJsonObject{{"role", "user"}, {"content", "Ответ не прошёл проверку:\n" + notes.mid(0, 16).join("\n")

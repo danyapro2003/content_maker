@@ -32,6 +32,7 @@ public:
     bool importEventMapV3(const QString& logDirectory, QString& error);
     void setImportLogDirectory(const QString& directory) { m_importLogDirectory = directory; }
     void checkModelFormat(const QString& logDirectory);
+    void setOfflinePreview(bool enabled) { m_offlinePreview = enabled; }
 
     // subsRu / subsEn — текст субтитров (может быть пустым, если отключено в настройках)
     void findHighlights(const MediaInfo& info, const QString& subsRu, const QString& subsEn);
@@ -133,6 +134,7 @@ private:
     QString m_analysisDirectory, m_story3ModelKey, m_story3IndexKey, m_story3PlanKey;
     QString m_story3RequestKey;
     bool m_story3Active = false;
+    bool m_offlinePreview = false;
     QString m_importLogDirectory;
     QList<StoryContext::SourceUnit> m_story3Units;
     StoryContext::BranchContext m_story3Context;

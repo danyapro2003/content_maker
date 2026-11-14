@@ -218,6 +218,14 @@ StoryProtocol::ParseResult<QJsonArray> plans(const QJsonObject& response, const 
                 visiting.remove(event); done.insert(event); return true;
             };
             for (const auto& event : used) if (!visit(event)) fail("INVALID_CHAIN", id, "chain", "Пропуск обязательного события или цикл зависимостей");
+            for (auto it = dependencies.cbegin(); it != dependencies.cend(); ++it)
+                if (!visit(it.key())) fail("INVALID_CHAIN", id, "chain", "Цикл или неизвестная зависимость в дополнительной части цепочки");
+            QSet<QString> optional;
+            for (const auto& event : branch["optional_events"].toArray()) {
+                if (!event.isString() || !known.contains(event.toString()) || optional.contains(event.toString()) || used.contains(event.toString()))
+                    fail("UNKNOWN_EVENT", id, "optional_events", "Нужны уникальные необязательные события из карты");
+                optional.insert(event.toString());
+            }
             if (!known.contains(branch["hook"].toObject()["event_id"].toString())) fail("INVALID_HOOK", id, "hook", "Хук должен ссылаться на карту");
             if (!branch["source_unit_ids"].isArray() || branch["source_unit_ids"].toArray().isEmpty()) fail("MISSING_UNITS", id, "source_unit_ids", "Нужны ID реальных единиц материала");
             if (!branch["missing_evidence"].isArray()) fail("MISSING_EVIDENCE_FIELD", id, "missing_evidence", "Нужен массив недостающих подтверждений");

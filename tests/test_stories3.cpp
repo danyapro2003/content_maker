@@ -26,6 +26,8 @@ void testStoryTimeline();
 void testStoryContext();
 void checkLiveModel(const QString&, const QString&);
 void liveV3Run(const QStringList&);
+void prepareV3Source(const QString&, const QString&);
+void renderV3Evaluation(const QStringList&);
 void replayV3Run(const QString&, const QString&);
 void replayEventIndex(const QString& directory, const QString& packedPath);
 
@@ -633,12 +635,20 @@ int main(int argc, char** argv)
             require(argc == 4, "--replay-v3-run log-directory packed-transcript.md");
             replayV3Run(app.arguments()[2], app.arguments()[3]); return 0;
         }
+        if (app.arguments().contains("--prepare-v3")) {
+            require(argc == 4, "--prepare-v3 settings.json source");
+            prepareV3Source(app.arguments()[2], app.arguments()[3]); return 0;
+        }
+        if (app.arguments().contains("--render-v3")) {
+            require(argc == 8, "--render-v3 settings.json source packed.md clean-words.json evaluation_result.json output-directory");
+            renderV3Evaluation(app.arguments()); return 0;
+        }
         if (app.arguments().contains("--check-live-model")) {
             require(argc == 4, "--check-live-model settings.json log-directory");
             checkLiveModel(app.arguments()[2], app.arguments()[3]); return 0;
         }
-        if (app.arguments().contains("--live-v3")) {
-            require(argc == 8, "--live-v3 settings.json source packed.md import-log-dir-or-dash output-dir count");
+        if (app.arguments().contains("--live-v3") || app.arguments().contains("--preview-v3")) {
+            require(argc == 8 || argc == 9, "--live-v3 settings.json source packed.md import-log-dir-or-dash output-dir count [request-budget<=36]");
             liveV3Run(app.arguments()); return 0;
         }
         if (app.arguments().contains("--compose")) {

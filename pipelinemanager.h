@@ -40,6 +40,7 @@ public:
     void addFilesToQueue(const QStringList& files);
     void setMode(Mode mode) { m_mode = mode; }
     void setImportLogDirectory(const QString& directory) { llm.setImportLogDirectory(directory); }
+    void setOfflinePreview(bool enabled) { llm.setOfflinePreview(enabled); }
 
 signals:
     void logMessage(const QString& msg);
