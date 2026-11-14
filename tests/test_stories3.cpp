@@ -76,6 +76,7 @@ public:
     bool viewerAlwaysFails = false;
     bool fidelityFailOnce = false;
     bool malformedAudit = false;
+    bool unchangedRepair = false;
     int indexFailure = 0; // 1: recover, 2: bad repair, 3: omitted repair, 4: bad envelope
     int repairs = 0, fidelities = 0, indexes = 0;
     QList<QJsonObject> requests;
@@ -163,8 +164,9 @@ public:
                         const bool fail = viewer ? (viewerAlwaysFails || (viewerFailOnce && reviews == 1))
                                                  : (fidelityFailOnce && fidelities == 1);
                         content = malformedAudit ? "{\"pass\":true}" : QString::fromUtf8(QJsonDocument(QJsonObject{
-                            {"action", "audit"}, {"understood_story", "Observed story"}, {"pass", !fail},
-                            {"issues", fail ? QJsonArray{QJsonObject{{"block", 2}, {"kind", "missing_context"}, {"problem", "Missing motivation"}}} : QJsonArray{}}
+                            {"protocol_version", 2}, {"action", "audit_story"}, {"understood_story", "Observed story"}, {"verdict", fail ? "repair" : "pass"},
+                            {"issues", fail ? QJsonArray{QJsonObject{{"block_id", "V2"}, {"kind", "missing_context"},
+                                {"severity", "blocking"}, {"evidence", "Transition from first block to second"}, {"problem", "Missing motivation"}}} : QJsonArray{}}
                         }).toJson());
                     } else {
                         if (system.contains("STAGE_REPAIR")) ++repairs;
@@ -181,6 +183,8 @@ public:
                         }
                         auto story = stories[0].toObject();
                         auto segments = story["segments"].toArray();
+                        if (system.contains("STAGE_REPAIR") && !unchangedRepair && (viewerFailOnce || fidelityFailOnce || viewerAlwaysFails)
+                            && repairs % 2 == 1) segments.removeAt(2);
                         for (int i = 0; i < segments.size(); ++i) {
                             auto segment = segments[i].toObject();
                             segment["block_id"] = QString("B%1_%2").arg(branch).arg(i + 1);
@@ -188,8 +192,11 @@ public:
                             segments[i] = segment;
                         }
                         story["segments"] = segments;
-                        content = QString::fromUtf8(QJsonDocument(QJsonObject{{"protocol_version", 2}, {"action", "edit_story"},
-                            {"branch_id", QString("B%1").arg(branch)}, {"story", story}}).toJson());
+                        QJsonObject response{{"protocol_version", 2}, {"action", "edit_story"},
+                            {"branch_id", QString("B%1").arg(branch)}, {"story", story}};
+                        const auto baseHash = QRegularExpression("base_draft_hash: ([a-f0-9]{64})").match(user);
+                        if (baseHash.hasMatch()) response["base_draft_hash"] = baseHash.captured(1);
+                        content = QString::fromUtf8(QJsonDocument(response).toJson());
                     }
                     ++calls;
                     const QByteArray body = QJsonDocument(QJsonObject{{"choices", QJsonArray{
@@ -409,10 +416,11 @@ static void runTests(const QString& python)
     require(!StoryNarrative::acceptAudit({{"action", "audit"}, {"pass", true},
                 {"understood_story", "story"}, {"issues", QJsonArray{QJsonObject{{"block", 1}, {"kind", "gap"}, {"problem", "gap"}}}}}, 2, auditError),
             "contradictory audit accepted");
-    auto runScenario = [&](bool failOnce, bool alwaysFail, bool malformed, bool omit, bool fidelityFail) {
+    auto runScenario = [&](bool failOnce, bool alwaysFail, bool malformed, bool omit, bool fidelityFail, bool unchanged = false) {
         MockLlm scenario;
         scenario.viewerFailOnce = failOnce; scenario.viewerAlwaysFails = alwaysFail;
         scenario.malformedAudit = malformed; scenario.omitRequired = omit; scenario.fidelityFailOnce = fidelityFail;
+        scenario.unchangedRepair = unchanged;
         settings.llmBaseUrl = scenario.url();
         LlmClient candidate;
         QEventLoop loop;
@@ -427,7 +435,7 @@ static void runTests(const QString& python)
         else require(success && !failed, "repair did not complete");
         if (failOnce || fidelityFail) require(scenario.repairs == 1 && scenario.reviews == 3,
                 "repair was not checked again by isolated viewer");
-        if (alwaysFail) require(scenario.repairs == 4 && scenario.reviews == 6, "repair budget is not bounded per branch");
+        if (alwaysFail) require(scenario.repairs == (unchanged ? 2 : 4) && scenario.reviews == (unchanged ? 2 : 4), "unchanged edit was re-audited / repair budget exceeded");
         if (omit) require(scenario.reviews == 0, "missing mandatory event reached reviewer");
     };
     runScenario(true, false, false, false, false);
@@ -435,6 +443,7 @@ static void runTests(const QString& python)
     runScenario(false, true, false, false, false);
     runScenario(false, false, true, false, false);
     runScenario(false, false, false, true, false);
+    runScenario(false, true, false, false, false, true);
     for (int mode : {1, 2, 3, 4}) {
         MockLlm scenario; scenario.indexFailure = mode;
         settings.llmBaseUrl = scenario.url();

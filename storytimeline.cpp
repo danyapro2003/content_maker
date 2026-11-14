@@ -10,9 +10,9 @@ QString hash(const StoryClip& story)
 {
     QJsonArray blocks;
     for (const auto& block : story.segments)
-        blocks.append(QJsonObject{{"id", block.blockId}, {"start", block.startSec}, {"end", block.endSec},
+        blocks.append(QJsonObject{{"start", block.startSec}, {"end", block.endSec},
             {"start_phrase", block.startPhrase}, {"end_phrase", block.endPhrase}});
-    return StoryRunStore::hash({{"version", 1}, {"blocks", blocks}, {"opening_mode", story.openingMode}});
+    return StoryRunStore::hash({{"version", 2}, {"blocks", blocks}});
 }
 
 StoryProtocol::ParseResult<CompiledStory> compile(const StoryClip& draft, const QList<S3Phrase>& phrases,

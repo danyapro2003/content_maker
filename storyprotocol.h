@@ -27,4 +27,5 @@ template<class T> struct ParseResult {
 ParseResult<QJsonDocument> document(QString text);
 ParseResult<StoryClip> parseEdit(const QString& text, const QList<S3Phrase>& phrases,
                                const QString& branchId = {});
+ParseResult<QJsonObject> parseAudit(const QString& text, const StoryClip& story);
 }

@@ -32,6 +32,52 @@ QString LlmClient::stageCacheKey(const QJsonArray& messages) const
     return StoryRunStore::hash({{"model_key", m_story3ModelKey}, {"messages", messages}});
 }
 
+void LlmClient::checkModelFormat(const QString& logDirectory)
+{
+    setRunLogDirectory(logDirectory);
+    m_transport.resetBudget(2); m_modelCheckReports = {};
+    const auto& settings = AppSettings::instance();
+    const QJsonObject dependencies{{"model", settings.llmModel},
+        {"provider", QUrl(settings.llmBaseUrl).toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery)},
+        {"prompt", StoryRunStore::hashText(StoryNarrative::auditPrompt(false))}, {"examples_version", 1}};
+    m_modelCheckKey = StoryRunStore::hash(dependencies);
+    m_story3Store.open(QFileInfo(logDirectory).absolutePath() + "/model_format_cache", dependencies);
+    const auto saved = m_story3Store.load("format", m_modelCheckKey);
+    if (!saved.isEmpty()) {
+        QTimer::singleShot(0, this, [this, saved]() {
+            emit modelFormatChecked(saved["data"].toObject()["ok"].toBool(), "Проверка формата из кэша: " + saved["data"].toObject()["message"].toString());
+        });
+        return;
+    }
+    emit logMessage("Проверка формата модели: до двух коротких API-запросов, без фильма.");
+    checkModelTurn(0);
+}
+
+void LlmClient::checkModelTurn(int index)
+{
+    if (index >= 2) {
+        bool valid = true; for (const auto& report : m_modelCheckReports) valid &= report.toObject()["valid_schema"].toBool();
+        const QString message = valid ? "Формат двух ответов корректен. Это не гарантирует качество монтажа; смысловые оценки сохранены в логах."
+                                      : "Модель нарушила контракт проверяющего; подробности в логах.";
+        m_story3Store.save("format", m_modelCheckKey, {{"ok", valid}, {"message", message}, {"reports", m_modelCheckReports}});
+        emit modelFormatChecked(valid, message); return;
+    }
+    const QString material = index == 0
+        ? "Блок V1: А: Если опоздаю на поезд, пропущу собеседование. Б: Беги, отправление через минуту!\nБлок V2: А: Успел сесть! Теперь приеду вовремя."
+        : "Блок V1: А: Я ему не доверяю и ни за что не дам ключ.\nБлок V2: А: Держи ключ, доверяю тебе. Б: Почему передумал?";
+    sendChat({QJsonObject{{"role", "system"}, {"content", "STAGE_VIEWER. " + StoryNarrative::auditPrompt(false)}},
+              QJsonObject{{"role", "user"}, {"content", material}}},
+        [this, index](bool ok, const QString& content) {
+            if (!ok) { emit modelFormatChecked(false, content); return; }
+            StoryClip story; StorySegment first, second; first.blockId = "V1"; second.blockId = "V2"; story.segments = {first, second};
+            const auto report = StoryProtocol::parseAudit(content, story);
+            m_modelCheckReports.append(QJsonObject{{"example", index + 1}, {"valid_schema", report.ok()},
+                {"report", report.value}, {"errors", report.errors()}});
+            writeRunArtifact("format_check.json", {{"reports", m_modelCheckReports}});
+            checkModelTurn(index + 1);
+        }, QString("format_check_%1").arg(index + 1));
+}
+
 // ---------- утилиты ----------
 
 double LlmClient::parseTimecode(QString s)
@@ -513,13 +559,10 @@ QList<StoryClip> LlmClient::validateStoriesV3(const QList<StoryClip>& input,
     return output;
 }
 
-static QJsonObject storyObject(QString content)
+static QJsonObject storyObject(const QString& content)
 {
-    content.remove(QRegularExpression("```(?:json)?", QRegularExpression::CaseInsensitiveOption));
-    const int first = content.indexOf('{');
-    const int last = content.lastIndexOf('}');
-    if (first < 0 || last < first) return {};
-    return QJsonDocument::fromJson(content.mid(first, last - first + 1).toUtf8()).object();
+    const auto parsed = StoryProtocol::document(content);
+    return parsed.ok() ? parsed.value.object() : QJsonObject{};
 }
 
 static QString storyEditInstructions(const AppSettings& s)
@@ -777,20 +820,14 @@ void LlmClient::startNextStoryBranchV3()
     ++m_story3BranchIndex;
     const auto& settings = AppSettings::instance();
     if (m_story3BranchIndex >= m_story3Plans.size() || m_story3Results.size() >= settings.minClips) {
-        emit storySelectionFinished(qMin(m_story3BranchIndex, int(m_story3Plans.size())), m_story3Results.size(), m_story3Failures.size());
-        writeRunArtifact("selection.json", {{"requested_min", settings.minClips},
-            {"requested_max", settings.maxClips}, {"accepted", serializeStories(m_story3Results)},
-            {"failures", QJsonArray::fromStringList(m_story3Failures)}});
-        if (m_story3Results.size() < settings.minClips) {
-            emit errorOccurred(QString("V3: прошли проверку %1 историй, требуется %2. Рендер не запущен; причины сохранены в logs.\n%3")
-                .arg(m_story3Results.size()).arg(settings.minClips).arg(m_story3Failures.join("\n"))); return;
-        }
-        emit storiesFound(m_story3Results, serializeStories(m_story3Results)); return;
+        finishSelectionV3(); return;
     }
     m_story3Plan = m_story3Plans[m_story3BranchIndex].toObject();
     m_story3Phase = Story3Phase::Edit; m_story3Retried = false;
     m_story3Sent = 0; m_story3Turn = 0; m_story3Repairs = 0; m_story3Draft.clear();
     m_story3ContextRequests = 0; m_story3ExtraUnits.clear();
+    m_story3FormatRepairs = 0; m_story3SeenTimelines.clear(); m_story3LastReport = {}; m_story3BaseDraftHash.clear();
+    saveStoryStateV3("planned");
     m_story3Context = StoryContext::build(m_story3Plan, m_story3Events, m_story3Units, settings.s3BranchContextChars);
     if (!m_story3Context.ok() || m_story3Plan["needs_visual"].toBool()) {
         rejectStoryV3(m_story3Plan["needs_visual"].toBool() ? "Нужна визуальная проверка обязательного события."
@@ -804,6 +841,37 @@ void LlmClient::startNextStoryBranchV3()
         QJsonObject{{"role", "user"}, {"content", storyEditorMaterial() + "\n" + storyEditInstructions(settings)}}};
     emit logMessage(QString("LLM v3: история %1/%2 — сборка необходимых событий.").arg(m_story3BranchIndex + 1).arg(m_story3Plans.size()));
     runStoryTurnV3();
+}
+
+void LlmClient::finishSelectionV3(const QString& stopReason)
+{
+    const auto& settings = AppSettings::instance();
+    if (!stopReason.isEmpty()) m_story3Failures.append(stopReason);
+    const int considered = qMin(m_story3BranchIndex + int(!stopReason.isEmpty()), int(m_story3Plans.size()));
+    emit storySelectionFinished(considered, m_story3Results.size(), m_story3Failures.size());
+    writeRunArtifact("selection.json", {{"requested_min", settings.minClips}, {"requested_max", settings.maxClips},
+        {"considered", considered}, {"accepted", serializeStories(m_story3Results)},
+        {"failures", QJsonArray::fromStringList(m_story3Failures)}, {"stop_reason", stopReason}});
+    if (m_story3Results.isEmpty() || (m_story3Results.size() < settings.minClips && !settings.s3AllowPartial)) {
+        emit errorOccurred(QString("V3: прошли проверку %1 историй, требуется %2. Рендер не запущен.\n%3")
+            .arg(m_story3Results.size()).arg(settings.minClips).arg(m_story3Failures.join("\n"))); return;
+    }
+    if (m_story3Results.size() < settings.minClips)
+        emit logMessage(QString("V3: частичный результат — сохраняю %1 из %2 запрошенных историй.")
+            .arg(m_story3Results.size()).arg(settings.minClips));
+    emit storiesFound(m_story3Results, serializeStories(m_story3Results));
+}
+
+void LlmClient::saveStoryStateV3(const QString& status, const QJsonObject& details)
+{
+    if (m_story3BranchIndex < 0) return;
+    const auto state = QJsonObject{{"status", status}, {"branch", m_story3Plan},
+        {"drafts", serializeStories(m_story3Draft)}, {"repairs", m_story3Repairs},
+        {"format_repairs", m_story3FormatRepairs}, {"context_requests", m_story3ContextRequests},
+        {"details", details}};
+    writeRunArtifact(QString("branch_%1.state.json").arg(m_story3BranchIndex + 1), state);
+    m_story3Store.save("branch", StoryRunStore::hash({{"plan_key", m_story3PlanKey}, {"branch", m_story3Plan}}), state,
+        status == "accepted" ? "complete" : "checkpoint");
 }
 
 QString LlmClient::storyEditorMaterial() const
@@ -822,6 +890,8 @@ QString LlmClient::storyEditorMaterial() const
 void LlmClient::reviewStoryDraftV3(const QList<StoryClip>& draft)
 {
     m_story3Draft = draft;
+    m_story3SeenTimelines.insert(draft.first().timelineHash);
+    saveStoryStateV3("compiled");
     auditStoryV3(false);
 }
 
@@ -842,6 +912,7 @@ void LlmClient::auditStoryV3(bool fidelity)
 void LlmClient::rejectStoryV3(const QString& reason)
 {
     m_story3Failures << QString("Ветка %1: %2").arg(m_story3BranchIndex + 1).arg(reason);
+    saveStoryStateV3("rejected", {{"reason", reason}});
     emit logMessage("LLM v3: ветка отклонена: " + reason);
     startNextStoryBranchV3();
 }
@@ -850,6 +921,9 @@ void LlmClient::repairStoryV3(const QJsonObject& report)
 {
     if (m_story3Repairs >= 2) { rejectStoryV3("после двух исправлений остались проблемы: " + QString::fromUtf8(QJsonDocument(report).toJson())); return; }
     ++m_story3Repairs;
+    m_story3LastReport = report;
+    m_story3BaseDraftHash = StoryRunStore::hash({{"draft", serializeStories(m_story3Draft)}});
+    saveStoryStateV3("repair", report);
     m_story3Phase = Story3Phase::Repair; m_story3Retried = false; m_story3Sent = 0; m_story3Turn = 0;
     m_story3Messages = {
         QJsonObject{{"role", "system"}, {"content", "STAGE_REPAIR. Ты — редактор. Исправь конкретные провалы в показанном материале. "
@@ -858,7 +932,8 @@ void LlmClient::repairStoryV3(const QJsonObject& report)
         QJsonObject{{"role", "user"}, {"content", "Замечания:\n" + QString::fromUtf8(QJsonDocument(report).toJson())
             + "\n" + storyEditorMaterial()
             + "\nЧерновик:\n" + QString::fromUtf8(QJsonDocument(serializeStories(m_story3Draft)).toJson())
-            + "\n" + storyEditInstructions(AppSettings::instance())}}};
+            + "\n" + storyEditInstructions(AppSettings::instance())
+            + "\nВ корень edit_story добавь base_draft_hash: " + m_story3BaseDraftHash}}};
     emit logMessage(QString("LLM v3: исправление %1/2.").arg(m_story3Repairs));
     runStoryTurnV3();
 }
@@ -878,7 +953,12 @@ void LlmClient::runStoryTurnV3()
     }
     const auto stage = m_story3BranchIndex < 0 ? phase : QString("branch_%1_%2").arg(m_story3BranchIndex + 1).arg(phase);
     sendChat(m_story3Messages, [this](bool ok, const QString& content) {
-        if (!ok) { emit errorOccurred("LLM v3: " + content); return; }
+        if (!ok) {
+            saveStoryStateV3(content.contains("REQUEST_BUDGET_EXHAUSTED") ? "budget_exhausted" : "transport_error", {{"error", content}});
+            if (m_story3BranchIndex >= 0) finishSelectionV3(content);
+            else emit errorOccurred("LLM v3: " + content);
+            return;
+        }
         m_story3Messages.append(QJsonObject{{"role", "assistant"}, {"content", content}});
         const auto& s = AppSettings::instance();
         QList<QPair<double, double>> ranges;
@@ -904,7 +984,9 @@ void LlmClient::runStoryTurnV3()
             m_story3Context = expanded;
             m_story3Messages = {m_story3Messages.first(), QJsonObject{{"role", "user"},
                 {"content", storyEditorMaterial() + "\n" + storyEditInstructions(s)
-                    + "\nПредыдущий черновик:\n" + QString::fromUtf8(QJsonDocument(serializeStories(m_story3Draft)).toJson())}}};
+                    + "\nПредыдущий черновик:\n" + QString::fromUtf8(QJsonDocument(serializeStories(m_story3Draft)).toJson())
+                    + "\nЗамечания:\n" + QString::fromUtf8(QJsonDocument(m_story3LastReport).toJson())
+                    + (m_story3BaseDraftHash.isEmpty() ? QString() : "\nДобавь base_draft_hash: " + m_story3BaseDraftHash)}}};
             writeRunArtifact(QString("branch_%1.context_expanded.json").arg(m_story3BranchIndex + 1),
                 {{"unit_ids", QJsonArray::fromStringList(expanded.unitIds)}, {"text", expanded.text}});
             runStoryTurnV3(); return;
@@ -915,18 +997,35 @@ void LlmClient::runStoryTurnV3()
             if (acceptStoryPlanV3(content, error)) { startNextStoryBranchV3(); return; }
             notes << error;
         } else if (m_story3Phase == Story3Phase::Viewer || m_story3Phase == Story3Phase::Fidelity) {
-            if (StoryNarrative::acceptAudit(object, m_story3Draft.first().segments.size(), error)) {
-                writeRunArtifact(m_lastRequestPrefix + ".audit.json", object);
-                if (!object["pass"].toBool()) { repairStoryV3(object); return; }
-                if (m_story3Phase == Story3Phase::Viewer) { auditStoryV3(true); return; }
+            const auto checked = StoryProtocol::parseAudit(content, m_story3Draft.first());
+            if (checked.ok()) {
+                const auto report = checked.value;
+                writeRunArtifact(m_lastRequestPrefix + ".audit.json", report);
+                const auto verdict = report["verdict"].toString();
+                if (verdict == "needs_visual" || verdict == "unjudgeable") {
+                    saveStoryStateV3(verdict, report);
+                    rejectStoryV3(verdict + ": " + QString::fromUtf8(QJsonDocument(report["issues"].toArray()).toJson())); return;
+                }
+                if (!report["pass"].toBool()) { repairStoryV3(report); return; }
+                if (m_story3Phase == Story3Phase::Viewer) {
+                    saveStoryStateV3("viewer_passed", report); auditStoryV3(true); return;
+                }
                 for (auto& story : m_story3Draft) story.narrativePlan = m_story3Plan;
                 m_story3Results.append(m_story3Draft);
+                saveStoryStateV3("accepted", report);
                 emit logMessage("LLM v3: история прошла проверки зрителя и верности исходнику.");
                 startNextStoryBranchV3(); return;
             }
-            notes << error;
+            notes = checked.messages();
+            writeRunArtifact(m_lastRequestPrefix + ".audit_protocol_error.json", {{"issues", checked.errors()}});
         } else {
-            const auto decoded = StoryProtocol::parseEdit(content, m_s3Phrases);
+            const auto decoded = StoryProtocol::parseEdit(content, m_s3Phrases, m_story3Plan["branch_id"].toString());
+            if (decoded.ok() && m_story3Phase == Story3Phase::Repair && decoded.value.protocolVersion == 2
+                && decoded.value.baseDraftHash != m_story3BaseDraftHash) {
+                if (m_story3FormatRepairs++ >= 1) { rejectStoryV3("STALE_DRAFT: неверный base_draft_hash после исправления формата."); return; }
+                m_story3Messages.append(QJsonObject{{"role", "user"}, {"content", "STALE_DRAFT: добавь base_draft_hash: " + m_story3BaseDraftHash}});
+                runStoryTurnV3(); return;
+            }
             const QList<StoryClip> parsed = decoded.ok() ? QList<StoryClip>{decoded.value} : QList<StoryClip>{};
             notes = decoded.messages();
             StoryTimeline::Options options;
@@ -966,12 +1065,30 @@ void LlmClient::runStoryTurnV3()
             }
             writeRunArtifact(m_lastRequestPrefix + ".validation.json", {{"accepted", !valid.isEmpty()},
                 {"notes", QJsonArray::fromStringList(notes)}, {"issues", decoded.errors()}, {"resolved_stories", serializeStories(parsed)}});
-            if (!valid.isEmpty()) { reviewStoryDraftV3(valid); return; }
+            if (!valid.isEmpty()) {
+                if (m_story3SeenTimelines.contains(valid.first().timelineHash)) {
+                    rejectStoryV3("UNCHANGED_MONTAGE: предложен уже проверенный монтаж; повторная оценка не оплачивается."); return;
+                }
+                reviewStoryDraftV3(valid); return;
+            }
+            bool technical = decoded.ok();
+            for (const auto& issue : decoded.issues)
+                if (issue.code == "UNKNOWN_PHRASE" || issue.code == "INVALID_ENDPOINT" || issue.code == "REVERSED_RANGE") technical = true;
+            if (technical) {
+                m_story3Draft = {decoded.ok() ? compiled.value.story : decoded.value};
+                QJsonArray issues = decoded.errors();
+                for (const auto& issue : compiled.errors()) issues.append(issue);
+                const QJsonObject report{{"kind", "technical_error"}, {"issues", issues}, {"notes", QJsonArray::fromStringList(notes)}};
+                saveStoryStateV3("technical_error", report);
+                repairStoryV3(report); return;
+            }
         }
         if (notes.isEmpty()) notes << "неверная структура ответа";
         writeRunArtifact(m_lastRequestPrefix + ".rejection.json", {{"accepted", false}, {"notes", QJsonArray::fromStringList(notes)}});
-        if (!m_story3Retried) {
+        const bool canRetry = m_story3BranchIndex >= 0 ? m_story3FormatRepairs++ < 1 : !m_story3Retried;
+        if (canRetry) {
             m_story3Retried = true;
+            saveStoryStateV3("format_error", {{"notes", QJsonArray::fromStringList(notes)}});
             m_story3Messages.append(QJsonObject{{"role", "user"}, {"content", "Ответ не прошёл проверку:\n" + notes.mid(0, 16).join("\n")
                 + "\nВерни исправленный ответ в формате текущего этапа."}});
             runStoryTurnV3(); return;

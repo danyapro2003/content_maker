@@ -29,6 +29,8 @@ void testStoryTimeline()
     require(compiled.value.story.totalSec() < 10 && compiled.value.story.totalSec() > 9, "overlap counted twice");
     auto changed = compiled.value.story; changed.segments[0].endSec += .1;
     require(StoryTimeline::hash(changed) != compiled.value.story.timelineHash, "timeline edit retained old audit hash");
+    changed = compiled.value.story; changed.segments[0].blockId = "renamed";
+    require(StoryTimeline::hash(changed) == compiled.value.story.timelineHash, "renaming blocks bypasses unchanged-montage protection");
     auto bad = clip; bad.segments[1].startPhrase = 1; bad.segments[1].endPhrase = 1;
     require(!StoryTimeline::compile(bad, phrases, events, plan, options).ok(), "repeated source accepted");
     bad = clip; bad.segments.removeAt(2);

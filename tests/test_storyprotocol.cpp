@@ -28,6 +28,24 @@ void testStoryProtocol()
     const auto json = QString::fromUtf8(QJsonDocument(QJsonArray{story}).toJson());
     require(StoryProtocol::parseEdit("```json\n" + json + "\n```", {speech}).ok(), "single fence rejected");
     require(!StoryProtocol::parseEdit("explanation " + json, {speech}).ok(), "arbitrary prose accepted");
+    StoryClip audited; StorySegment block; block.blockId = "private_branch_id"; audited.segments = {block};
+    QJsonObject report{{"protocol_version", 2}, {"action", "audit_story"}, {"understood_story", "Hero made a choice"},
+        {"verdict", "pass"}, {"issues", QJsonArray{}}};
+    auto audit = [&]() { return StoryProtocol::parseAudit(QString::fromUtf8(QJsonDocument(report).toJson()), audited); };
+    require(audit().ok(), "valid audit rejected");
+    report["understood_story"] = true;
+    require(!audit().ok() && audit().messages().join(" ").contains("understood_story"), "boolean understanding fabricated into pass");
+    report["understood_story"] = "A choice";
+    QJsonObject issue{{"block_id", "V1"}, {"kind", "missing_context"}, {"severity", "blocking"},
+        {"problem", "No cause"}, {"evidence", "A sudden decision"}};
+    report["issues"] = QJsonArray{issue};
+    require(!audit().ok(), "pass with blocking issue accepted");
+    report["verdict"] = "repair";
+    require(audit().ok() && audit().value["issues"].toArray()[0].toObject()["block_id"] == "private_branch_id", "neutral audit IDs not mapped");
+    issue["severity"] = "advisory"; report["issues"] = QJsonArray{issue}; report["verdict"] = "pass";
+    require(audit().ok(), "advisory blocks release");
+    report["issues"] = QJsonArray{"fix the spelling"};
+    require(!audit().ok(), "unstructured issue silently removed");
     FileRunResult failed; failed.status = "failed";
     FileRunResult complete; complete.status = "completed"; complete.renderedStories = 1;
     complete.outputs = {"ru.mp4", "en.mp4"};

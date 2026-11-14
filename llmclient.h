@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSet>
 #include "llmtransport.h"
 #include "metadataparser.h"
 #include "stories3runner.h"
@@ -30,6 +31,7 @@ public:
     void setAnalysisDirectory(const QString& directory) { m_analysisDirectory = directory; }
     bool importEventMapV3(const QString& logDirectory, QString& error);
     void setImportLogDirectory(const QString& directory) { m_importLogDirectory = directory; }
+    void checkModelFormat(const QString& logDirectory);
 
     // subsRu / subsEn — текст субтитров (может быть пустым, если отключено в настройках)
     void findHighlights(const MediaInfo& info, const QString& subsRu, const QString& subsEn);
@@ -78,6 +80,7 @@ signals:
     void logMessage(const QString& msg);
     void errorOccurred(const QString& errorMessage);
     void storySelectionFinished(int considered, int accepted, int rejected);
+    void modelFormatChecked(bool ok, const QString& message);
 
 private:
     void runAnalyst();
@@ -136,6 +139,15 @@ private:
     QStringList m_story3ExtraUnits;
     int m_story3ContextRequests = 0;
     QString storyEditorMaterial() const;
+    int m_story3FormatRepairs = 0;
+    QSet<QString> m_story3SeenTimelines;
+    QJsonObject m_story3LastReport;
+    QString m_story3BaseDraftHash;
+    void saveStoryStateV3(const QString& status, const QJsonObject& details = {});
+    void finishSelectionV3(const QString& stopReason = {});
+    void checkModelTurn(int index);
+    QJsonArray m_modelCheckReports;
+    QString m_modelCheckKey;
     QString stageCacheKey(const QJsonArray& messages) const;
 
     // Общая подготовка текста сабов по настройке; false — текста нет

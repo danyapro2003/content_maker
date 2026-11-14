@@ -488,6 +488,20 @@ void MainWindow::buildSettingsTab()
         cbS3RunMode->setCurrentIndex(1);
         appendLog("При следующем запуске V3 проверю и импортирую карту: " + directory);
     });
+    auto* checkModel = new QPushButton("Проверить формат LLM (до 2 API-запросов)", this);
+    s3->addRow(checkModel);
+    connect(checkModel, &QPushButton::clicked, this, [this, checkModel]() {
+        saveSettingsFromUi(); checkModel->setEnabled(false);
+        auto* checker = new LlmClient; checker->setParent(this);
+        connect(checker, &LlmClient::logMessage, this, &MainWindow::appendLog);
+        connect(checker, &LlmClient::modelFormatChecked, this, [this, checker, checkModel](bool ok, const QString& message) {
+            appendLog((ok ? "[ФОРМАТ LLM] " : "[ОШИБКА ФОРМАТА LLM] ") + message);
+            checkModel->setEnabled(true); checker->deleteLater();
+        });
+        const auto directory = QFileInfo(AppSettings::instance().settingsFilePath()).absolutePath()
+            + "/diagnostics/format_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz");
+        checker->checkModelFormat(directory);
+    });
 
     QPushButton* saveBtn = new QPushButton("Сохранить настройки", this);
     connect(saveBtn, &QPushButton::clicked, this, [this]() {

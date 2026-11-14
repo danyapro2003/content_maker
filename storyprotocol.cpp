@@ -30,6 +30,62 @@ ParseResult<QJsonDocument> document(QString text)
             "один полный JSON-документ", error.errorString(), {{"offset", double(error.offset)}}});
     return result;
 }
+ParseResult<QJsonObject> parseAudit(const QString& text, const StoryClip& story)
+{
+    ParseResult<QJsonObject> result;
+    const auto parsed = document(text);
+    if (!parsed.ok()) { result.issues = parsed.issues; return result; }
+    const auto object = parsed.value.object();
+    auto fail = [&](const QString& field, const QJsonValue& actual, const QString& expected, const QString& why) {
+        result.issues.append({"AUDIT_PROTOCOL_ERROR", "audit", story.branchId, {}, field, actual, expected, why, {}});
+    };
+    const bool legacy = object["action"] == "audit";
+    if (!legacy && (object["action"] != "audit_story" || object["protocol_version"] != 2))
+        fail("action", object["action"], "protocol_version=2, action=audit_story", "Неверный контракт проверяющего");
+    if (!object["understood_story"].isString() || object["understood_story"].toString().trimmed().isEmpty())
+        fail("understood_story", object["understood_story"], "строка: что понял зритель", "Нужен пересказ понимания, не boolean и не исправленная расшифровка");
+    if (!object["issues"].isArray()) fail("issues", object["issues"], "массив замечаний", "Неверный тип issues");
+    QString verdict = legacy ? (object["pass"].toBool() ? "pass" : "repair") : object["verdict"].toString();
+    if (legacy && (!object["pass"].isBool() || object["pass"].toBool() != object["issues"].toArray().isEmpty()))
+        fail("pass", object["pass"], "boolean, true только при пустом issues", "Противоречивый старый audit");
+    if (!QStringList{"pass", "repair", "needs_visual", "unjudgeable"}.contains(verdict))
+        fail("verdict", object["verdict"], "pass / repair / needs_visual / unjudgeable", "Неизвестный вердикт");
+    bool blocking = false;
+    QJsonArray normalized;
+    for (const auto& value : object["issues"].toArray()) {
+        const auto issue = value.toObject();
+        int number = -1;
+        if (legacy && issue["block"].isDouble() && issue["block"].toDouble() == issue["block"].toInt())
+            number = issue["block"].toInt();
+        if (!legacy) {
+            const auto match = QRegularExpression("\\AV([1-9][0-9]*)\\z").match(issue["block_id"].toString());
+            if (match.hasMatch()) number = match.captured(1).toInt();
+        }
+        if (number < 1 || number > story.segments.size())
+            fail("issues.block_id", legacy ? issue["block"] : issue["block_id"], "ID показанного блока V1, V2…", "Замечание не привязано к ролику");
+        if (issue["kind"].toString().trimmed().isEmpty() || issue["problem"].toString().trimmed().isEmpty())
+            fail("issues", value, "объект с kind и problem", "Нужно конкретное замечание, не строка");
+        const auto severity = legacy ? QString("blocking") : issue["severity"].toString();
+        if (severity != "blocking" && severity != "advisory")
+            fail("issues.severity", issue["severity"], "blocking или advisory", "Неизвестная серьёзность проблемы");
+        if (!legacy && issue["evidence"].toString().trimmed().isEmpty())
+            fail("issues.evidence", issue["evidence"], "конкретная реплика или стык", "Нет подтверждения замечания");
+        blocking |= severity == "blocking";
+        auto mapped = issue;
+        mapped["block"] = number;
+        mapped["viewer_block_id"] = QString("V%1").arg(number);
+        mapped["block_id"] = number >= 1 && number <= story.segments.size() ? story.segments[number - 1].blockId : QString();
+        mapped["severity"] = severity;
+        normalized.append(mapped);
+    }
+    if ((verdict == "pass" && blocking) || (verdict != "pass" && !blocking))
+        fail("verdict/issues", verdict, "вердикт согласован с блокирующими замечаниями", "Нельзя скрывать проблему положительной оценкой");
+    result.value = {{"protocol_version", 2}, {"action", "audit_story"}, {"understood_story", object["understood_story"]},
+        {"verdict", verdict}, {"pass", verdict == "pass"}, {"issues", normalized},
+        {"timeline_hash", story.timelineHash}, {"source_protocol", legacy ? 1 : 2}};
+    return result;
+}
+
 ParseResult<StoryClip> parseEdit(const QString& text, const QList<S3Phrase>& phrases, const QString& branchId)
 {
     ParseResult<StoryClip> result;
