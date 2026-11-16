@@ -34,7 +34,7 @@ public:
     void setImportLogDirectory(const QString& directory) { m_importLogDirectory = directory; }
     void checkModelFormat(const QString& logDirectory);
     void createSceneCaptionsV4(const QList<SrtCue>& words, const QList<double>& cuts, const QString& language,
-        const std::function<void(bool, const QList<SrtCue>&, const QString&)>& callback);
+        const std::function<void(bool, const QList<SrtCue>&, const QString&)>& callback, const StoryClip& story = {});
     void setOfflinePreview(bool enabled) { m_offlinePreview = enabled; }
 
     // subsRu / subsEn — текст субтитров (может быть пустым, если отключено в настройках)

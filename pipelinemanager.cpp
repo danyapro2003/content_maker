@@ -1141,7 +1141,7 @@ void PipelineManager::renderTaskWithSrt(const QString& srtPath)
                     onErrorOccurred("V4: не удалось сохранить субтитры."); return;
                 }
                 renderTaskWithSubtitles(assPath);
-            });
+            }, m_stories.value(task.clipIndex));
         return;
     }
     if (isNarrativeMode()) {

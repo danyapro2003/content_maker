@@ -78,7 +78,7 @@ public:
     bool invalidEdits = false;
     bool visualPlan = false, visualUnresolved = false;
     int replans = 0;
-    bool badCaption = false, captionAuditFail = false;
+    bool badCaption = false, captionAuditFail = false, lateCaption = false;
     int invalidBranch = 0;
     int emptyBranch = 0;
     int longBranch = 0;
@@ -120,8 +120,8 @@ public:
                     if (system.contains("STAGE_V4_CAPTION_AUDIT")) {
                         content = captionAuditFail ? R"({"pass":false,"reason":"unsupported claim"})" : R"({"pass":true,"reason":""})";
                     } else if (system.contains("STAGE_V4_CAPTIONS")) {
-                        content = badCaption ? R"({"captions":[{"block":0,"text":"A difficult choice","evidence_quote":"invented"}]})"
-                            : R"({"captions":[{"block":0,"text":"A difficult choice","evidence_quote":"I must choose"}]})";
+                        content = lateCaption ? R"({"captions":[{"block":0,"offset_sec":4,"text":"A difficult choice","evidence_quote":"I must choose"}]})" : badCaption ? R"({"captions":[{"block":0,"text":"A difficult choice","evidence_quote":"invented"}]})"
+                            : R"({"captions":[{"block":0,"offset_sec":1,"text":"A difficult choice","viewer_gap":"Why he hesitates","evidence_quote":"I must choose"}]})";
                     } else if (system.contains("STAGE_INDEX")) {
                         ++indexes;
                         QJsonArray events;
@@ -295,8 +295,8 @@ static void runTests(const QString& python)
     settings.s3QuoteCheck = true;
     settings.agentFramesEnabled = false;
     settings.llmApiKey.clear();
-    for (int scenarioId = 0; scenarioId < 3; ++scenarioId) {
-        MockLlm mock; mock.badCaption = scenarioId == 1; mock.captionAuditFail = scenarioId == 2;
+    for (int scenarioId = 0; scenarioId < 4; ++scenarioId) {
+        MockLlm mock; mock.badCaption = scenarioId == 1; mock.captionAuditFail = scenarioId == 2; mock.lateCaption = scenarioId == 3;
         settings.llmBaseUrl = mock.url(); LlmClient captionClient; QEventLoop loop;
         bool completed = false, passed = false;
         QTimer timer; timer.setSingleShot(true); timer.start(5000);
@@ -304,11 +304,14 @@ static void runTests(const QString& python)
         captionClient.createSceneCaptionsV4({{1, 0, 5, "I must choose"}}, {}, "en",
             [&](bool ok, const QList<SrtCue>& captions, const QString&) {
                 completed = true; passed = ok;
-                if (ok) require(captions.size() == 1 && captions.first().endSec <= 5, "invalid caption timing");
+                if (ok) require(captions.size() == 1 && captions.first().startSec == 1 && captions.first().endSec <= 5, "invalid caption timing");
                 loop.quit();
             });
         loop.exec(); require(completed && passed == (scenarioId == 0), "caption evidence/audit validation failed");
-        require(mock.requests.size() == (scenarioId == 1 ? 1 : 2), "caption validation request count wrong");
+        require(mock.requests.size() == ((scenarioId == 1 || scenarioId == 3) ? 1 : 2), "caption validation request count wrong");
+        const auto requestText = mock.requests.first()["messages"].toArray().last().toObject()["content"].toString();
+        require(requestText.contains("film_events") && requestText.contains("source_phrases") && requestText.contains("clip_start"),
+                "caption request missing context or clip timing");
     }
     S3Phrase proof;
     proof.text = "I killed nobody"; proof.startSec = 110; proof.endSec = 116;
