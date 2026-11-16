@@ -78,6 +78,7 @@ public:
     bool invalidEdits = false;
     bool visualPlan = false, visualUnresolved = false;
     int replans = 0;
+    bool badCaption = false, captionAuditFail = false;
     int invalidBranch = 0;
     int emptyBranch = 0;
     int longBranch = 0;
@@ -116,7 +117,12 @@ public:
                     const QString system = messages.first().toObject().value("content").toString();
                     const QString label = data.contains("BETA_") ? "BETA" : "ALPHA";
                     QString content;
-                    if (system.contains("STAGE_INDEX")) {
+                    if (system.contains("STAGE_V4_CAPTION_AUDIT")) {
+                        content = captionAuditFail ? R"({"pass":false,"reason":"unsupported claim"})" : R"({"pass":true,"reason":""})";
+                    } else if (system.contains("STAGE_V4_CAPTIONS")) {
+                        content = badCaption ? R"({"captions":[{"block":0,"text":"A difficult choice","evidence_quote":"invented"}]})"
+                            : R"({"captions":[{"block":0,"text":"A difficult choice","evidence_quote":"I must choose"}]})";
+                    } else if (system.contains("STAGE_INDEX")) {
                         ++indexes;
                         QJsonArray events;
                         const auto user = messages.last().toObject()["content"].toString();
@@ -289,6 +295,21 @@ static void runTests(const QString& python)
     settings.s3QuoteCheck = true;
     settings.agentFramesEnabled = false;
     settings.llmApiKey.clear();
+    for (int scenarioId = 0; scenarioId < 3; ++scenarioId) {
+        MockLlm mock; mock.badCaption = scenarioId == 1; mock.captionAuditFail = scenarioId == 2;
+        settings.llmBaseUrl = mock.url(); LlmClient captionClient; QEventLoop loop;
+        bool completed = false, passed = false;
+        QTimer timer; timer.setSingleShot(true); timer.start(5000);
+        QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+        captionClient.createSceneCaptionsV4({{1, 0, 5, "I must choose"}}, {}, "en",
+            [&](bool ok, const QList<SrtCue>& captions, const QString&) {
+                completed = true; passed = ok;
+                if (ok) require(captions.size() == 1 && captions.first().endSec <= 5, "invalid caption timing");
+                loop.quit();
+            });
+        loop.exec(); require(completed && passed == (scenarioId == 0), "caption evidence/audit validation failed");
+        require(mock.requests.size() == (scenarioId == 1 ? 1 : 2), "caption validation request count wrong");
+    }
     S3Phrase proof;
     proof.text = "I killed nobody"; proof.startSec = 110; proof.endSec = 116;
     require(!LlmClient::checkQuote("I killed everybody", 100, 160, {proof}).found,
@@ -532,6 +553,14 @@ static void runTests(const QString& python)
     require(SubtitleComposer::readablePhrases(tinyWords, 4, {.36}).size() == 2,
             "subtitle phrase crossed a scene cut");
     const auto assPath = temporary.filePath("readable.ass");
+    const QString v4Path = assPath + ".v4.ass";
+    require(SubtitleComposer::writeAssV4({{1, 0, 1, "one"}, {2, .5, 1.5, "two"}},
+        {{0, 0, 1, "Scene {text}"}}, v4Path, 64, {.8}), "cannot write V4 subtitles");
+    QFile v4File(v4Path); require(v4File.open(QIODevice::ReadOnly), "missing V4 ASS");
+    const auto v4Ass = v4File.readAll();
+    require(v4Ass.contains("0:00:00.00,0:00:00.50,Word") && v4Ass.contains("0:00:00.50,0:00:00.80,Word"),
+            "V4 words overlap or cross a cut");
+    require(v4Ass.contains("Style: Scene") && !v4Ass.contains("Scene {text}"), "V4 captions not escaped/styled");
     require(SubtitleComposer::writeAss(tinyWords, assPath), "cannot write styled subtitles");
     require(readFile(assPath).contains("PlayResY: 1920") && readFile(assPath).contains("word word word word"),
             "subtitle resolution or phrase grouping lost");
@@ -704,6 +733,12 @@ int main(int argc, char** argv)
         if (app.arguments().contains("--live-v3") || app.arguments().contains("--preview-v3")) {
             require(argc == 8 || argc == 9, "--live-v3 settings.json source packed.md import-log-dir-or-dash output-dir count [request-budget<=36]");
             liveV3Run(app.arguments()); return 0;
+        }
+        if (app.arguments().contains("--compose-v4")) {
+            require(argc == 4, "--compose-v4 input.srt output.ass");
+            require(SubtitleComposer::writeAssV4(SrtUtils::parseFile(app.arguments()[2]),
+                {{0, 0, 4, "Питеру предстоит сделать выбор"}}, app.arguments()[3]), "cannot compose V4");
+            return 0;
         }
         if (app.arguments().contains("--compose")) {
             require(argc == 4, "--compose input.srt output.ass");

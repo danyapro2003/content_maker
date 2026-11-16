@@ -35,7 +35,7 @@ class PipelineManager : public QObject
 public:
     explicit PipelineManager(QObject *parent = nullptr);
 
-    enum class Mode { Highlights, Stories, Stories3 };
+    enum class Mode { Highlights, Stories, Stories3, Stories4 };
 
     void addFilesToQueue(const QStringList& files);
     void setMode(Mode mode) { m_mode = mode; }
@@ -103,6 +103,8 @@ private:
     void startRenderTasks();
     void processNextRenderTask();
     void renderTaskWithSrt(const QString& srtPath);
+    void renderTaskWithSubtitles(const QString& subtitlePath);
+    bool isNarrativeMode() const { return m_mode == Mode::Stories3 || m_mode == Mode::Stories4; }
 
     // Пересказ 3.0: субтитры клипа из чистого ASR-транскрипта (без whisper)
     QString buildS3ClipSrt(const RenderTask& task, const QString& srtBase);

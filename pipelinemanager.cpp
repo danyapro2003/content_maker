@@ -111,7 +111,7 @@ void PipelineManager::onErrorOccurred(const QString& errorMessage)
     if (m_agentFramesPending) {
         m_agentFramesPending = false;
         emit logMessage("[ПРЕДУПРЕЖДЕНИЕ] " + errorMessage + " Продолжаю без кадров.");
-        if (m_mode == Mode::Stories3)
+        if (isNarrativeMode())
             llm.deliverStoryFramesV3({});
         else
             llm.deliverStoryFrames({});
@@ -120,7 +120,7 @@ void PipelineManager::onErrorOccurred(const QString& errorMessage)
 
     m_runError += (m_runError.isEmpty() ? QString() : "\n") + errorMessage;
     emit logMessage("[ОШИБКА] " + errorMessage);
-    if (m_mode == Mode::Stories3 && m_taskIndex >= 0 && m_taskIndex < m_renderTasks.size()) {
+    if (isNarrativeMode() && m_taskIndex >= 0 && m_taskIndex < m_renderTasks.size()) {
         const bool fatal = errorMessage.contains(QRegularExpression(
             "no space left|not enough space|недостаточно места|Не удалось запустить", QRegularExpression::CaseInsensitiveOption));
         if (!fatal) {
@@ -184,11 +184,11 @@ void PipelineManager::startPipeline(const QString& path)
     QDir().mkpath(m_runLogDirectory);
     m_fileResult.logDirectory = m_runLogDirectory;
     const auto runId = QFileInfo(m_runLogDirectory).fileName();
-    m_runOutputDirectory = m_mode == Mode::Stories3 ? outDir + "/runs/" + runId : outDir;
-    m_renderTempDirectory = m_mode == Mode::Stories3 ? tempDir + "/runs/" + runId : tempDir;
+    m_runOutputDirectory = isNarrativeMode() ? outDir + "/runs/" + runId : outDir;
+    m_renderTempDirectory = isNarrativeMode() ? tempDir + "/runs/" + runId : tempDir;
     QDir().mkpath(m_runOutputDirectory); QDir().mkpath(m_renderTempDirectory);
     m_fileResult.outputDirectory = m_runOutputDirectory;
-    if (m_mode == Mode::Stories3)
+    if (isNarrativeMode())
         writeResultJson(outDir + "/latest_attempt.json", {{"status", "running"}, {"output_directory", m_runOutputDirectory}, {"log_directory", m_runLogDirectory}});
     m_runError.clear();
     m_runOutputs.clear();
@@ -222,7 +222,7 @@ void PipelineManager::startPipeline(const QString& path)
 
     emit logMessage("=== Файл: " + baseName + " ===");
     emit logMessage("Логи текущего прогона: " + m_runLogDirectory);
-    if (m_mode == Mode::Stories3)
+    if (isNarrativeMode())
         emit logMessage(QString("V3: %1; готовые транскрипты берутся из кэша. ").arg(
             QStringList{"продолжение анализа", "пересборка историй по готовой карте", "полный анализ LLM"}.value(int(settings.s3RunMode))) +
                         "Число историй " + QString::number(settings.minClips) + "–"
@@ -282,7 +282,7 @@ void PipelineManager::startSubtitleStage()
     }
 
     // Пересказ 3.0: свой путь (карта музыки + чанки + ревизор), сабы не нужны
-    if (m_mode == Mode::Stories3) {
+    if (isNarrativeMode()) {
         emit logMessage("Шаг 3/6: транскрипт фильма (Пересказ 3.0, чистый ASR)...");
         startStories3();
         return;
@@ -454,6 +454,7 @@ void PipelineManager::onTranscriptionDone(const QString& srtPath)
 
 void PipelineManager::startStories3()
 {
+    if (m_mode == Mode::Stories4) emit logMessage("V4: истории по пайплайну V3; пословные субтитры и проверенные пояснения сцен (до 2 дополнительных LLM-запросов на языковую версию).");
     // дорожка: RU, затем EN, затем первая доступная (как в v2)
     int audioIndex = -1;
     if (currentInfo.rusAudioIndex >= 0)
@@ -701,7 +702,7 @@ void PipelineManager::onFramesExtracted(const QString& dirPath)
     }
 
     emit logMessage(QString("Кадры для агента готовы: %1 шт.").arg(frames.size()));
-    if (m_mode == Mode::Stories3 && AppSettings::instance().s3Filmstrip) {
+    if (isNarrativeMode() && AppSettings::instance().s3Filmstrip) {
         QList<QPair<double, QString>> sheets;
         for (int first = 0; first < frames.size(); first += 9) {
             const int count = qMin(9, int(frames.size()) - first);
@@ -724,7 +725,7 @@ void PipelineManager::onFramesExtracted(const QString& dirPath)
         }
         if (!sheets.isEmpty()) frames = sheets;
     }
-    if (m_mode == Mode::Stories3)
+    if (isNarrativeMode())
         llm.deliverStoryFramesV3(frames);
     else
         llm.deliverStoryFrames(frames);
@@ -825,19 +826,19 @@ void PipelineManager::onStoriesFound(const QList<StoryClip>& stories, const QJso
 
     // Пересказ 3.0: слова/фразы чище, чем у whisper, и приходят из своего SRT.
     // Снаппинг делаем по ним же, чтобы не тянуть whisper-эвристики.
-    if (m_mode == Mode::Stories3) {
+    if (isNarrativeMode()) {
         loadS3Words();
         m_cues = m_s3Words;
     }
 
     // паддинги: whisper/ASR-режим — от границ фраз, subs-режим — от реплик
-    const bool wordLevel = s.storyWhisperTranscript || m_mode == Mode::Stories3;
+    const bool wordLevel = s.storyWhisperTranscript || isNarrativeMode();
     double padStart = wordLevel ? s.editPaddingMs / 1000.0 : s.padStartSec;
     double padEnd   = wordLevel ? s.editPaddingMs / 1000.0 : s.padEndSec;
 
     m_stories.clear();
     for (StoryClip story : stories) {
-        if (m_mode == Mode::Stories3) {
+        if (isNarrativeMode()) {
             if (story.timelineHash.isEmpty() || story.timelineHash != StoryTimeline::hash(story)
                 || story.totalSec() < s.s3MinClipSec - .001 || story.totalSec() > s.s3MaxClipSec + .001) {
                 onErrorOccurred("V3: монтаж изменился после аудита или не прошёл компиляцию временной шкалы."); return;
@@ -870,11 +871,11 @@ void PipelineManager::onStoriesFound(const QList<StoryClip>& stories, const QJso
 
     emit logMessage(QString("LLM создала %1 пересказов (после снаппинга: %2).")
                         .arg(stories.size()).arg(m_stories.size()));
-    if (m_stories.isEmpty() || (m_mode == Mode::Stories3 && m_stories.size() < s.minClips && !s.s3AllowPartial)) {
+    if (m_stories.isEmpty() || (isNarrativeMode() && m_stories.size() < s.minClips && !s.s3AllowPartial)) {
         onErrorOccurred("Не осталось пересказов с допустимой длительностью.");
         return;
     }
-    if (m_mode == Mode::Stories3 && m_stories.size() < s.minClips)
+    if (isNarrativeMode() && m_stories.size() < s.minClips)
         m_runError = QString("Частичный результат: %1 историй из требуемых %2.").arg(m_stories.size()).arg(s.minClips);
     emit storiesFound(m_stories);
     llm.writeRunArtifact("final_edl.json", {{"stories", LlmClient::serializeStories(m_stories)}});
@@ -882,7 +883,7 @@ void PipelineManager::onStoriesFound(const QList<StoryClip>& stories, const QJso
     // сохраняем метаданные + отдельные txt с подписями для постов
     QFile f(m_runOutputDirectory + "/stories.json");
     if (f.open(QIODevice::WriteOnly)) {
-        f.write(QJsonDocument(m_mode == Mode::Stories3
+        f.write(QJsonDocument(isNarrativeMode()
                     ? LlmClient::serializeStories(m_stories) : rawJson).toJson(QJsonDocument::Indented));
         f.close();
     }
@@ -904,7 +905,7 @@ void PipelineManager::startRenderTasks()
     const auto& settings = AppSettings::instance();
     const int count = m_mode == Mode::Highlights ? m_highlights.size() : m_stories.size();
     m_fileResult.expectedVideos = count * (int(settings.renderRu) + int(settings.renderEn));
-    if (m_mode != Mode::Stories3) m_fileResult.accepted = count;
+    if (!isNarrativeMode()) m_fileResult.accepted = count;
     if (m_renderTasks.isEmpty()) {
         m_runError = "Нет задач рендера (проверь настройки языков и наличие аудиодорожек).";
         emit logMessage(m_runError);
@@ -1010,7 +1011,7 @@ void PipelineManager::processNextRenderTask()
 
     // Пересказ 3.0: субтитры клипа берём из чистого ASR-транскрипта,
     // whisper для клипа не запускаем вовсе (он и был источником галлюцинаций).
-    if (m_mode == Mode::Stories3 && task.lang == m_storyTranscriptLang) {
+    if (isNarrativeMode() && task.lang == m_storyTranscriptLang) {
         const QString s3Srt = buildS3ClipSrt(task, task.srtBase);
         if (!s3Srt.isEmpty()) {
             emit logMessage(QString("Пересказ 3.0: клип %1/%2 на чистых сабах.")
@@ -1113,7 +1114,7 @@ QString PipelineManager::buildS3ClipSrt(const RenderTask& task, const QString& s
 double PipelineManager::storyTransitionSec() const
 {
     // Dialogue keeps its full timing. Brief edge audio fades are applied by the renderer.
-    return m_mode == Mode::Stories3 ? 0.0 : AppSettings::instance().storyCrossfadeSec;
+    return isNarrativeMode() ? 0.0 : AppSettings::instance().storyCrossfadeSec;
 }
 
 void PipelineManager::renderTaskWithSrt(const QString& srtPath)
@@ -1122,7 +1123,28 @@ void PipelineManager::renderTaskWithSrt(const QString& srtPath)
         return;
     const RenderTask& task = m_renderTasks[m_taskIndex];
     QString subtitlePath = srtPath;
-    if (m_mode == Mode::Stories3) {
+    if (m_mode == Mode::Stories4) {
+        QList<double> cuts; double position = 0;
+        for (int i = 0; i + 1 < task.segments.size(); ++i) {
+            position += task.segments[i].second - task.segments[i].first; cuts.append(position);
+        }
+        const auto words = SrtUtils::parseFile(srtPath);
+        const QString assPath = task.srtBase + ".v4.ass";
+        const int taskIndex = m_taskIndex;
+        const QString runDirectory = m_runLogDirectory;
+        emit logMessage("V4: создаю пояснения сцен по выбранным репликам и проверяю их смысл.");
+        llm.createSceneCaptionsV4(words, cuts, task.lang,
+            [this, words, cuts, assPath, taskIndex, runDirectory](bool ok, const QList<SrtCue>& captions, const QString& error) {
+                if (!m_fileActive || m_taskIndex != taskIndex || m_runLogDirectory != runDirectory) return;
+                if (!ok) { onErrorOccurred("V4: пояснения сцен не прошли проверку: " + error); return; }
+                if (!SubtitleComposer::writeAssV4(words, captions, assPath, AppSettings::instance().s3SubtitleFontSize, cuts)) {
+                    onErrorOccurred("V4: не удалось сохранить субтитры."); return;
+                }
+                renderTaskWithSubtitles(assPath);
+            });
+        return;
+    }
+    if (isNarrativeMode()) {
         subtitlePath = task.srtBase + ".readable.ass";
         const auto& settings = AppSettings::instance();
         QList<double> cuts;
@@ -1138,17 +1160,24 @@ void PipelineManager::renderTaskWithSrt(const QString& srtPath)
         }
     }
 
+    renderTaskWithSubtitles(subtitlePath);
+}
+
+void PipelineManager::renderTaskWithSubtitles(const QString& subtitlePath)
+{
+    if (m_taskIndex < 0 || m_taskIndex >= m_renderTasks.size()) return;
+    const RenderTask& task = m_renderTasks[m_taskIndex];
     if (task.isStory && task.segments.size() > 1) {
         emit logMessage(QString("Рендер пересказа %1 [%2]...")
                             .arg(task.clipIndex + 1).arg(task.lang));
         renderer.renderStoryClip(currentFilePath, task.segments, task.audioIndex,
                                  subtitlePath, task.outPath,
-                                  storyTransitionSec(), m_mode == Mode::Stories3);
+                                  storyTransitionSec(), isNarrativeMode());
     } else {
         emit logMessage(QString("Рендер клипа %1 [%2]...")
                             .arg(task.clipIndex + 1).arg(task.lang));
         renderer.renderClip(currentFilePath, task.startSec, task.endSec, task.audioIndex,
-                            subtitlePath, task.outPath, m_mode == Mode::Stories3);
+                            subtitlePath, task.outPath, isNarrativeMode());
     }
 }
 
@@ -1179,7 +1208,7 @@ void PipelineManager::finishCurrentFile()
     auto result = m_fileResult.json();
     result["finished_utc"] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
     llm.writeRunArtifact("result.json", result);
-    if (m_mode == Mode::Stories3) {
+    if (isNarrativeMode()) {
         const bool saved = writeResultJson(m_runOutputDirectory + "/result.json", result)
             && writeResultJson(outDir + "/latest_attempt.json", result);
         if (!saved) emit logMessage("[ПРЕДУПРЕЖДЕНИЕ] Не удалось сохранить манифест результата; проверь logs/result.json.");

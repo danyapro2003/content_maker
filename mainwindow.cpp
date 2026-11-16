@@ -143,6 +143,7 @@ void MainWindow::on_start_pb_clicked()
     const bool isStory = ui->mode_cb->currentIndex() >= 1;
     Manager->setMode(ui->mode_cb->currentIndex() == 1
                          ? PipelineManager::Mode::Stories
+                         : ui->mode_cb->currentIndex() == 3 ? PipelineManager::Mode::Stories4
                          : isStory
                                ? PipelineManager::Mode::Stories3
                                : PipelineManager::Mode::Highlights);

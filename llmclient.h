@@ -11,6 +11,7 @@
 #include "storytypes.h"
 #include "storyrunstore.h"
 #include "storycontext.h"
+#include "srtutils.h"
 
 struct Highlight {
     QString title;
@@ -32,6 +33,8 @@ public:
     bool importEventMapV3(const QString& logDirectory, QString& error);
     void setImportLogDirectory(const QString& directory) { m_importLogDirectory = directory; }
     void checkModelFormat(const QString& logDirectory);
+    void createSceneCaptionsV4(const QList<SrtCue>& words, const QList<double>& cuts, const QString& language,
+        const std::function<void(bool, const QList<SrtCue>&, const QString&)>& callback);
     void setOfflinePreview(bool enabled) { m_offlinePreview = enabled; }
 
     // subsRu / subsEn — текст субтитров (может быть пустым, если отключено в настройках)

@@ -69,6 +69,11 @@
               <string>Пересказ 3.0 (чистый транскрипт)</string>
              </property>
             </item>
+            <item>
+             <property name="text">
+              <string>Пересказ 4.0 (слова + пояснения сцен)</string>
+             </property>
+            </item>
            </widget>
           </item>
           <item>
