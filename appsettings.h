@@ -26,6 +26,7 @@ public:
     QString llmApiKey;
     QString llmModel = "gpt-4o-mini";
     int llmTimeoutMinutes = 15;
+    int llmMaxOutputTokens = 100000;
 
     // Какие субтитры отправлять в LLM
     SubsForLlm subsForLlm = SubsForLlm::Both;

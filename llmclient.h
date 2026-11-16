@@ -122,6 +122,7 @@ private:
     void auditStoryV3(bool fidelity);
     void repairStoryV3(const QJsonObject& report);
     void beginStoryBranchV3();
+    void replanStoryV3(const QString& reason, const QJsonObject& report);
     int m_story3Shortenings = 0;
     int m_story3Replans = 0;
     void rejectStoryV3(const QString& reason);

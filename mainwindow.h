@@ -50,6 +50,7 @@ private:
     QLineEdit* leLlmKey = nullptr;
     QLineEdit* leLlmModel = nullptr;
     QSpinBox* spLlmTimeout = nullptr;
+    QSpinBox* spLlmMaxOutput = nullptr;
     QComboBox* cbSubsForLlm = nullptr;
     QCheckBox* chkRenderRu = nullptr;
     QCheckBox* chkRenderEn = nullptr;

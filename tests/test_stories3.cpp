@@ -76,6 +76,8 @@ public:
     int plans = 0;
     int reviews = 0;
     bool invalidEdits = false;
+    bool visualPlan = false, visualUnresolved = false;
+    int replans = 0;
     int invalidBranch = 0;
     int emptyBranch = 0;
     int longBranch = 0;
@@ -108,6 +110,8 @@ public:
                     socket->setProperty("answered", true);
                     const auto request = QJsonDocument::fromJson(data.mid(split + 4, length)).object();
                     requests.append(request);
+                    require(request["max_completion_tokens"].toInt() == AppSettings::instance().llmMaxOutputTokens,
+                            "configured output limit missing from actual HTTP request");
                     const auto messages = request.value("messages").toArray();
                     const QString system = messages.first().toObject().value("content").toString();
                     const QString label = data.contains("BETA_") ? "BETA" : "ALPHA";
@@ -149,10 +153,13 @@ public:
                             }
                             content = QString::fromUtf8(QJsonDocument(QJsonObject{{"action", "index_events"}, {"events", events}}).toJson());
                         }
-                    } else if (system.contains("STAGE_PLAN")) {
+                    } else if (system.contains("STAGE_PLAN") || system.contains("STAGE_REPLAN")) {
                         ++plans;
+                        const bool replan = system.contains("STAGE_REPLAN");
+                        if (replan) ++replans;
+                        const int selected = replan && messages.last().toObject()["content"].toString().contains("\"branch_id\": \"B2\"") ? 2 : 1;
                         QJsonArray branches;
-                        for (int branch = 1; branch <= 2; ++branch) {
+                        for (int branch = replan ? selected : 1; branch <= (replan ? selected : 2); ++branch) {
                             const QJsonArray required = branch == 1 ? QJsonArray{"C1E1", "C1E3", "C1E7"} : QJsonArray{"C1E2", "C1E4", "C1E8"};
                             QJsonArray chain;
                             for (int i = 0; i < required.size(); ++i) chain.append(QJsonObject{{"event_id", required[i]},
@@ -161,7 +168,7 @@ public:
                             branches.append(QJsonObject{{"branch_id", QString("B%1").arg(branch)}, {"title", label + QString::number(branch)},
                                 {"dramatic_question", "goal " + QString::number(branch)}, {"ending_effect", "reaction"},
                                 {"hook", QJsonObject{{"event_id", required[0]}, {"mode", "natural"}, {"why_interesting", "intrigue"}}},
-                                {"chain", chain}, {"missing_evidence", QJsonArray{}},
+                                {"chain", chain}, {"missing_evidence", visualPlan && (!replan || visualUnresolved) ? QJsonArray{"execution not shown"} : QJsonArray{}},
                                 {"source_unit_ids", branch == 1 ? QJsonArray{"U1", "U3", "U5", "U7"} : QJsonArray{"U2", "U4", "U6", "U8"}},
                                 {"required_events", required}, {"ending_event", branch == 1 ? "C1E7" : "C1E8"}});
                         }
@@ -445,6 +452,20 @@ static void runTests(const QString& python)
     require(!StoryNarrative::acceptAudit({{"action", "audit"}, {"pass", true},
                 {"understood_story", "story"}, {"issues", QJsonArray{QJsonObject{{"block", 1}, {"kind", "gap"}, {"problem", "gap"}}}}}, 2, auditError),
             "contradictory audit accepted");
+    for (bool unresolved : {false, true}) {
+        MockLlm scenario; scenario.visualPlan = true; scenario.visualUnresolved = unresolved;
+        settings.llmBaseUrl = scenario.url();
+        LlmClient candidate; QEventLoop loop;
+        bool success = false, failed = false;
+        QObject::connect(&candidate, &LlmClient::storiesFound, &loop, [&](const QList<StoryClip>&, const QJsonArray&) { success = true; loop.quit(); });
+        QObject::connect(&candidate, &LlmClient::errorOccurred, &loop, [&](const QString&) { failed = true; loop.quit(); });
+        QTimer timeout; timeout.setSingleShot(true);
+        QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+        timeout.start(10000); candidate.findStoriesV3(info, packed, phrases); loop.exec();
+        require(scenario.replans == 2, "each visual branch must have exactly one replan");
+        require(unresolved ? (failed && !success && scenario.reviews == 0) : (success && !failed && scenario.reviews == 2),
+                "visual evidence repair must recover or reject without bypassing audits");
+    }
     auto runScenario = [&](bool failOnce, bool alwaysFail, bool malformed, bool omit, bool fidelityFail, bool unchanged = false) {
         MockLlm scenario;
         scenario.viewerFailOnce = failOnce; scenario.viewerAlwaysFails = alwaysFail;

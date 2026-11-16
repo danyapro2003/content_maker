@@ -199,10 +199,30 @@ void LlmTransport::attempt(const std::shared_ptr<Pending>& pending)
     progress->setInterval(m_policy.progressIntervalMs);
     connect(progress, &QTimer::timeout, this, [this, pending, reply, received, elapsed]() {
         const bool headers = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid();
-        emit logMessage(QString("LLM [%1] %2: ожидание ответа %3 с из %4 с; HTTP-заголовки %5, получено %6 байт.")
+        bool incomplete = false;
+        const auto decoded = decodeResponse(*received, incomplete).object();
+        const auto choices = decoded["choices"].toArray();
+        const auto text = choices.isEmpty() ? QString()
+            : choices.first().toObject()["message"].toObject()["content"].toString();
+        bool onlyKeepalive = !received->trimmed().isEmpty();
+        for (const auto& line : received->split('\n')) {
+            const auto trimmed = line.trimmed();
+            if (!trimmed.isEmpty() && !trimmed.startsWith(':')) { onlyKeepalive = false; break; }
+        }
+        QString state;
+        if (!text.isEmpty())
+            state = QString("получено символов ответа: %1").arg(text.size());
+        else if (onlyKeepalive)
+            state = "получены служебные сигналы поддержания соединения; текст ответа ещё не поступил";
+        else if (received->isEmpty())
+            state = "текст ответа ещё не поступил";
+        else
+            state = "получены данные потока; текст ответа пока не выделен";
+        emit logMessage(QString("LLM [%1] %2: ожидание ответа %3 с из %4 с; HTTP-заголовки %5; %6. "
+                               "Получено по сети: %7 байт (включая служебные данные).")
             .arg(pending->stage, pending->body["model"].toString())
             .arg(elapsed.elapsed() / 1000).arg(pending->timeoutMs / 1000)
-            .arg(headers ? "получены" : "ещё не получены").arg(received->size()));
+            .arg(headers ? "получены" : "ещё не получены", state).arg(received->size()));
     });
     progress->start();
     connect(reply, &QNetworkReply::finished, this, [this, pending, reply, deadline, progress, received, elapsed, number, prefix]() {

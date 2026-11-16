@@ -38,6 +38,7 @@ void LlmClient::checkModelFormat(const QString& logDirectory)
     m_transport.resetBudget(2); m_modelCheckReports = {};
     const auto& settings = AppSettings::instance();
     const QJsonObject dependencies{{"model", settings.llmModel},
+        {"max_completion_tokens", settings.llmMaxOutputTokens},
         {"provider", QUrl(settings.llmBaseUrl).toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery)},
         {"prompt", StoryRunStore::hashText(StoryNarrative::auditPrompt(false))}, {"examples_version", 1}, {"transport", "sse_http1_v1"}};
     m_modelCheckKey = StoryRunStore::hash(dependencies);
@@ -150,6 +151,7 @@ void LlmClient::sendChat(const QJsonArray& messages,
     body["model"] = s.llmModel;
     body["messages"] = messages;
     body["temperature"] = 0.7;
+    body["max_completion_tokens"] = s.llmMaxOutputTokens;
 
     QString url = s.llmBaseUrl;
     if (url.endsWith('/'))
@@ -605,6 +607,7 @@ void LlmClient::findStoriesV3(const MediaInfo& info, const QString& packedTransc
     m_transport.resetBudget(settings.s3RequestLimit);
     const QUrl provider(settings.llmBaseUrl);
     m_story3ModelKey = StoryRunStore::hash({{"model", settings.llmModel},
+        {"max_completion_tokens", settings.llmMaxOutputTokens},
         {"provider", provider.toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery | QUrl::StripTrailingSlash)}, {"temperature", .7}});
     QString root = m_analysisDirectory;
     if (root.isEmpty() && !m_runLogDirectory.isEmpty()) {
@@ -843,9 +846,16 @@ void LlmClient::beginStoryBranchV3()
     m_story3FormatRepairs = 0; m_story3SeenTimelines.clear(); m_story3LastReport = {}; m_story3BaseDraftHash.clear();
     saveStoryStateV3("planned");
     m_story3Context = StoryContext::build(m_story3Plan, m_story3Events, m_story3Units, settings.s3BranchContextChars);
-    if (!m_story3Context.ok() || m_story3Plan["needs_visual"].toBool()) {
-        rejectStoryV3(m_story3Plan["needs_visual"].toBool() ? "Нужна визуальная проверка обязательного события."
-            : QString::fromUtf8(QJsonDocument(m_story3Context.issues).toJson())); return;
+    if (!m_story3Context.ok()) {
+        rejectStoryV3(QString::fromUtf8(QJsonDocument(m_story3Context.issues).toJson())); return;
+    }
+    if (m_story3Plan["needs_visual"].toBool()) {
+        const QString missing = QString::fromUtf8(QJsonDocument(m_story3Plan["missing_evidence"].toArray()).toJson(QJsonDocument::Compact));
+        if (m_story3Replans >= 1) {
+            rejectStoryV3("После переработки финалу всё ещё не хватает подтверждений: " + missing); return;
+        }
+        replanStoryV3("Финалу не хватает подтверждений: " + missing,
+                      {{"missing_evidence", m_story3Plan["missing_evidence"]}}); return;
     }
     writeRunArtifact(QString("branch_%1.context.json").arg(m_story3BranchIndex + 1),
         {{"unit_ids", QJsonArray::fromStringList(m_story3Context.unitIds)}, {"characters", m_story3Context.text.size()},
@@ -932,29 +942,34 @@ void LlmClient::rejectStoryV3(const QString& reason)
     startNextStoryBranchV3();
 }
 
+void LlmClient::replanStoryV3(const QString& reason, const QJsonObject& report)
+{
+    ++m_story3Replans;
+    m_story3Phase = Story3Phase::Replan;
+    m_story3Sent = 0;
+    m_story3Retried = false;
+    const auto& s = AppSettings::instance();
+    QJsonArray units;
+    for (const auto& unit : m_story3Units)
+        if (m_story3Context.unitIds.contains(unit.id)) units.append(unit.card());
+    m_story3Messages = {
+        QJsonObject{{"role", "system"}, {"content", "STAGE_REPLAN. Сузь конфликт текущей истории и выбери более близкий подготовленный финал. Используй только события предоставленной ветки."}},
+        QJsonObject{{"role", "user"}, {"content", StoryNarrative::planPrompt(m_story3Context.events, 1, 1, s.s3MinClipSec, s.s3MaxClipSec)
+        + "\nПричина переработки: " + reason + "\nНедостающие подтверждения нельзя просто удалить. Измени конфликт, обязательные события и финал так, чтобы они подтверждались репликами. Не выдавай приказ за исполнение, намерение за результат. Если это невозможно, честно сохрани missing_evidence.\nПредыдущий замысел:\n" + QString::fromUtf8(QJsonDocument(m_story3Plan).toJson())
+        + "\nКаталог материала:\n" + QString::fromUtf8(QJsonDocument(units).toJson())}}
+    };
+    saveStoryStateV3("replan", report);
+    emit logMessage("LLM v3: переработка замысла (1/1): " + reason);
+    runStoryTurnV3(); return;
+}
+
 void LlmClient::repairStoryV3(const QJsonObject& report)
 {
     bool tooLong = false;
     for (const auto& value : report["issues"].toArray())
         if (value.toObject()["code"] == "DRAFT_TOO_LONG") tooLong = true;
     if (tooLong && m_story3Shortenings >= 2 && m_story3Replans == 0) {
-        ++m_story3Replans;
-        m_story3Phase = Story3Phase::Replan;
-        m_story3Sent = 0;
-        m_story3Retried = false;
-        const auto& s = AppSettings::instance();
-        QJsonArray units;
-        for (const auto& unit : m_story3Units)
-            if (m_story3Context.unitIds.contains(unit.id)) units.append(unit.card());
-        m_story3Messages = {
-            QJsonObject{{"role", "system"}, {"content", "STAGE_REPLAN. Сузь конфликт текущей истории и выбери более близкий подготовленный финал. Используй только события предоставленной ветки."}},
-            QJsonObject{{"role", "user"}, {"content", StoryNarrative::planPrompt(m_story3Context.events, 1, 1, s.s3MinClipSec, s.s3MaxClipSec)
-                + "\nПредыдущий замысел:\n" + QString::fromUtf8(QJsonDocument(m_story3Plan).toJson())
-                + "\nКаталог материала:\n" + QString::fromUtf8(QJsonDocument(units).toJson())}}
-        };
-        saveStoryStateV3("replan", report);
-        emit logMessage("LLM v3: два сокращения не уложились в лимит; сужаю замысел ветки (1/1).");
-        runStoryTurnV3(); return;
+        replanStoryV3("Два сокращения не уложились в лимит; нужен более узкий замысел.", report); return;
     }
     if (tooLong) {
         if (m_story3Shortenings >= 2) { rejectStoryV3("История не помещается после двух сокращений и перепланирования."); return; }

@@ -59,8 +59,11 @@ void retryLoggedV3Request(const QStringList& args)
     endpointText += "/chat/completions";
     if (original["url"] != endpointText || body["model"] != settings.llmModel || !body["messages"].isArray())
         throw std::runtime_error("Logged request does not match configured provider/model");
-    const auto modelKey = StoryRunStore::hash({{"model", settings.llmModel},
-        {"provider", endpoint.toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery | QUrl::StripTrailingSlash)}, {"temperature", .7}});
+    QJsonObject modelDependencies{{"model", settings.llmModel},
+        {"provider", endpoint.toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery | QUrl::StripTrailingSlash)}, {"temperature", .7}};
+    if (body.contains("max_completion_tokens"))
+        modelDependencies["max_completion_tokens"] = body["max_completion_tokens"];
+    const auto modelKey = StoryRunStore::hash(modelDependencies);
     const auto key = StoryRunStore::hash({{"model_key", modelKey}, {"messages", body["messages"]}});
     QDir sourceRoot(QFileInfo(args[3]).absolutePath()); sourceRoot.cdUp(); sourceRoot.cdUp();
     QDir analysis(sourceRoot.filePath("analysis")); StoryRunStore store; bool found = false;

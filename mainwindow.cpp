@@ -235,6 +235,11 @@ void MainWindow::buildSettingsTab()
     form->addRow("LLM API key:", leLlmKey);
     leLlmModel = new QLineEdit(this);
     form->addRow("LLM модель:", leLlmModel);
+    spLlmMaxOutput = new QSpinBox(this);
+    spLlmMaxOutput->setRange(1, 1000000);
+    spLlmMaxOutput->setToolTip("Верхний предел генерации (max_completion_tokens), включая рассуждения. "
+                              "Допустимое значение зависит от модели и API-провайдера.");
+    form->addRow("Максимум выходных токенов:", spLlmMaxOutput);
     spLlmTimeout = new QSpinBox(this);
     spLlmTimeout->setRange(1, 60);
     spLlmTimeout->setSuffix(" мин");
@@ -541,6 +546,7 @@ void MainWindow::loadSettingsToUi()
     leLlmKey->setText(s.llmApiKey);
     leLlmModel->setText(s.llmModel);
     spLlmTimeout->setValue(s.llmTimeoutMinutes);
+    spLlmMaxOutput->setValue(s.llmMaxOutputTokens);
 
     QString subs = s.subsForLlm == AppSettings::SubsForLlm::RuOnly ? "ru"
                  : s.subsForLlm == AppSettings::SubsForLlm::EnOnly ? "en" : "both";
@@ -617,6 +623,7 @@ void MainWindow::saveSettingsFromUi()
     s.llmApiKey = leLlmKey->text().trimmed();
     s.llmModel = leLlmModel->text().trimmed();
     s.llmTimeoutMinutes = spLlmTimeout->value();
+    s.llmMaxOutputTokens = spLlmMaxOutput->value();
 
     QString subs = cbSubsForLlm->currentData().toString();
     s.subsForLlm = subs == "ru" ? AppSettings::SubsForLlm::RuOnly

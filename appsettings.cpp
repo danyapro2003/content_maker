@@ -109,6 +109,7 @@ bool AppSettings::load(const QString& path)
     llmBaseUrl       = o.value("llmBaseUrl").toString(llmBaseUrl);
     llmApiKey        = o.value("llmApiKey").toString(llmApiKey);
     llmModel         = o.value("llmModel").toString(llmModel);
+    llmMaxOutputTokens = qBound(1, o.value("llmMaxOutputTokens").toInt(llmMaxOutputTokens), 1000000);
     llmTimeoutMinutes = qBound(1, o.value("llmTimeoutMinutes").toInt(llmTimeoutMinutes), 60);
     subsForLlm       = strToSubs(o.value("subsForLlm").toString("both"));
     renderRu         = o.value("renderRu").toBool(renderRu);
@@ -194,6 +195,7 @@ bool AppSettings::save() const
     o["llmApiKey"]        = llmApiKey;
     o["llmModel"]         = llmModel;
     o["llmTimeoutMinutes"] = llmTimeoutMinutes;
+    o["llmMaxOutputTokens"] = llmMaxOutputTokens;
     o["subsForLlm"]       = subsToStr(subsForLlm);
     o["renderRu"]         = renderRu;
     o["renderEn"]         = renderEn;
