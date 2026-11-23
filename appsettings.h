@@ -52,7 +52,6 @@ public:
     // Снаппинг границ сегментов к репликам
     double padStartSec = 0.2;    // запас до начала первой реплики
     double padEndSec = 0.4;      // запас после конца последней реплики
-    double mergeGapSec = 1.0;    // склейка сегментов с зазором меньше этого
 
     // Отбраковка forced-сабов по содержимому: мин. реплик в час (0 = проверка выкл).
     // Полные сабы: 500–1500/час, forced: обычно < 50/час.
@@ -61,34 +60,25 @@ public:
     // Точное выравнивание word-сабов (DTW, требует -nfa)
     bool whisperDtw = true;
 
-    // Агентный доступ к кадрам (пересказ 2.0): LLM сама запрашивает фрагменты,
+    // Агентный доступ к кадрам: LLM сама запрашивает фрагменты,
     // которые хочет посмотреть, вместо готовой нарезки всего фильма
     bool agentFramesEnabled = true;
     double agentFrameIntervalSec = 2.0; // плотность кадров в запрошенном фрагменте
     int agentMaxTurns = 6;              // сколько запросов кадров может сделать LLM
     int agentMaxFramesPerTurn = 40;     // лимит кадров на один запрос
 
-    // Кроссфейд между склейками в пересказе (0 = выкл)
-    double storyCrossfadeSec = 0.25;
-
-    // --- Пересказ 2.0 ---
-    // Источник транскрипта для LLM: true = whisper word-level по всему фильму
-    // (точно, медленно, с кэшем), false = субтитры из файла (быстро, точность до реплики)
-    bool storyWhisperTranscript = true;
+    // Границы реплик и склеек пересказа
     double editPauseSec = 0.5;   // разрыв фразы при упаковке транскрипта
     double editMaxPhraseSec = 12.0; // макс. длина фразы (в плотных диалогах пауз почти нет)
     int editPaddingMs = 80;      // паддинг границ склейки (whisper-режим)
     int editAudioFadeMs = 30;    // аудио-фейды на границах склеек (0 = выкл)
 
     // Диаризация через pyannote (опционально, требует python venv + HF токен)
-    bool diarizationEnabled = false;
     QString pythonPath;          // путь к python.exe из venv
     QString hfToken;             // Hugging Face токен (модели pyannote gated)
     QString pyannoteModel = "pyannote/speaker-diarization-3.1";
 
-    // ---------------- Пересказ 3.0 ----------------
-    // Отдельный режим: чистый транскрипт (карта музыки + чанки + ревизор),
-    // выбор движков ASR/диаризации. Пересказ 2.0 не затрагивается.
+    // Анализ звука для пересказа
     enum class AsrEngine { WhisperCpp, FasterWhisper, GigaAmV3Ctc, GigaAmV3E2e, ParakeetV3 };
     enum class AudioMapEngine { Off, Zipformer, InaSpeechSegmenter };
     enum class DiarEngine { Off, SherpaOnnx, Pyannote };

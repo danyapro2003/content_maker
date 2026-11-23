@@ -12,8 +12,6 @@
 #include "whisperrunner.h"
 #include "cliprenderer.h"
 #include "srtutils.h"
-#include "transcriptpacker.h"
-#include "diarizerunner.h"
 #include "stories3pipeline.h"
 
 struct FileRunResult {
@@ -36,7 +34,7 @@ class PipelineManager : public QObject
 public:
     explicit PipelineManager(QObject *parent = nullptr);
 
-    enum class Mode { Highlights, Stories, Stories3, Stories4, Stories5 };
+    enum class Mode { Highlights = 0, Stories5 = 4 };
 
     void addFilesToQueue(const QStringList& files);
     void setV5Background(bool enabled) { m_v5Background = enabled; }
@@ -65,7 +63,7 @@ private slots:
     void onErrorOccurred(const QString& errorMessage);
 
 private:
-    enum class AudioPurpose { None, FallbackTranscribe, ClipSegment, StoryTranscript, Stories3Audio };
+    enum class AudioPurpose { None, FallbackTranscribe, ClipSegment, Stories3Audio };
 
     struct RenderTask {
         int clipIndex = 0;
@@ -91,10 +89,6 @@ private:
     void startLlmStage();
 
     // Пересказ 2.0: транскрипт whisper word-level по всему фильму (с кэшем)
-    void startStoryTranscript();
-    void onStoryTranscriptReady(const QString& srtPath);
-    void onDiarizationDone(const QString& jsonPath);
-    void finishStoryPacking();
 
     // Пересказ 3.0
     void startStories3();
@@ -106,13 +100,12 @@ private:
     void processNextRenderTask();
     void renderTaskWithSrt(const QString& srtPath);
     void renderTaskWithSubtitles(const QString& subtitlePath);
-    bool isNarrativeMode() const { return m_mode == Mode::Stories3 || m_mode == Mode::Stories4 || m_mode == Mode::Stories5; }
+    bool isNarrativeMode() const { return m_mode == Mode::Stories5; }
 
     // Пересказ 3.0: субтитры клипа из чистого ASR-транскрипта (без whisper)
     QString buildS3ClipSrt(const RenderTask& task, const QString& srtBase);
     // Проверенные слова из s3_clean_words.json → m_s3Words (для сабов клипа).
     void loadS3Words();
-    double storyTransitionSec() const;
 
     void finishCurrentFile();
 
@@ -130,7 +123,6 @@ private:
     LlmClient llm;
     WhisperRunner whisper;
     ClipRenderer renderer;
-    DiarizeRunner diarizer;
     Stories3Pipeline m_s3;
 
     // контекст текущего файла
@@ -164,8 +156,6 @@ private:
 
     QList<SrtCue> m_cues; // реплики/слова — для снаппинга границ сегментов
     QList<SrtCue> m_s3Words; // Пересказ 3.0: word-level слова из s3_words.json
-    QList<DiarSegment> m_diarSegs; // диаризация (опционально)
-    QString m_packedText; // упакованный транскрипт для LLM (пересказ)
     bool m_v5Background = false;
     void recordRenderedTask(const QString& outPath);
     QString m_storyTranscriptLang;

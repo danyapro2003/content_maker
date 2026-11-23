@@ -82,7 +82,7 @@ PipelineManager::PipelineManager(QObject *parent) : QObject(parent)
     connect(&llm, &LlmClient::errorOccurred, this, &PipelineManager::onErrorOccurred);
     connect(&llm, &LlmClient::storyFramesRequested, this, &PipelineManager::onStoryFramesRequested);
 
-    // Пересказ 3.0 — отдельный пайплайн
+    // Пересказ V5 — отдельный пайплайн
     m_s3.setLlmClient(&llm);
     connect(&m_s3, &Stories3Pipeline::logMessage, this, &PipelineManager::logMessage);
     connect(&m_s3, &Stories3Pipeline::failed, this, &PipelineManager::onStories3Failed);
@@ -92,14 +92,6 @@ PipelineManager::PipelineManager(QObject *parent) : QObject(parent)
 
     connect(&whisper, &WhisperRunner::transcriptionDone, this, &PipelineManager::onTranscriptionDone);
     connect(&whisper, &WhisperRunner::errorOccurred, this, &PipelineManager::onErrorOccurred);
-
-    connect(&diarizer, &DiarizeRunner::diarizationDone, this, &PipelineManager::onDiarizationDone);
-    connect(&diarizer, &DiarizeRunner::errorOccurred, this, [this](const QString& err) {
-        // диаризация опциональна — при ошибке просто продолжаем без меток спикеров
-        emit logMessage("[ПРЕДУПРЕЖДЕНИЕ] " + err + " Продолжаю без диаризации.");
-        m_diarSegs.clear();
-        finishStoryPacking();
-    });
 
     connect(&renderer, &ClipRenderer::logMessage, this, &PipelineManager::logMessage);
     connect(&renderer, &ClipRenderer::clipRendered, this, &PipelineManager::onClipRendered);
@@ -113,10 +105,7 @@ void PipelineManager::onErrorOccurred(const QString& errorMessage)
     if (m_agentFramesPending) {
         m_agentFramesPending = false;
         emit logMessage("[ПРЕДУПРЕЖДЕНИЕ] " + errorMessage + " Продолжаю без кадров.");
-        if (isNarrativeMode())
-            llm.deliverStoryFramesV3({});
-        else
-            llm.deliverStoryFrames({});
+        llm.deliverStoryFramesV3({});
         return;
     }
 
@@ -212,10 +201,8 @@ void PipelineManager::startPipeline(const QString& path)
     m_audioPurpose = AudioPurpose::None;
     m_cues.clear();
     m_s3Words.clear();
-    m_diarSegs.clear();
     m_highlights.clear();
     m_stories.clear();
-    m_packedText.clear();
     m_storyTranscriptLang.clear();
     m_s3AudioKey.clear();
     m_fallbackAudioLang.clear();
@@ -276,17 +263,8 @@ void PipelineManager::startSubtitleStage()
 {
     const AppSettings& s = AppSettings::instance();
 
-    // Пересказ 3.0 с whisper-транскриптом: сабы из файла не нужны вовсе —
-    // транскрибируем весь фильм word-level (с кэшем)
-    if (m_mode == Mode::Stories && s.storyWhisperTranscript) {
-        emit logMessage("Шаг 3/6: транскрипт фильма (whisper word-level)...");
-        startStoryTranscript();
-        return;
-    }
-
-    // Пересказ 3.0: свой путь (карта музыки + чанки + ревизор), сабы не нужны
     if (isNarrativeMode()) {
-        emit logMessage("Шаг 3/6: транскрипт фильма (Пересказ 3.0, чистый ASR)...");
+        emit logMessage("Шаг 3/6: транскрипт фильма (Пересказ V5, чистый ASR)...");
         startStories3();
         return;
     }
@@ -417,11 +395,6 @@ void PipelineManager::onAudioExtracted(const QString& outPath)
 {
     if (m_audioPurpose == AudioPurpose::FallbackTranscribe) {
         whisper.transcribe(outPath, tempDir + "/full_transcript", m_fallbackAudioLang, false);
-    } else if (m_audioPurpose == AudioPurpose::StoryTranscript) {
-        emit logMessage(QString("Whisper word-level [%1] по всему фильму (долго, кэшируется)...")
-                            .arg(m_storyTranscriptLang));
-        whisper.transcribe(outPath, tempDir + "/story_transcript_v2_" + m_storyTranscriptLang,
-                           m_storyTranscriptLang, true);
     } else if (m_audioPurpose == AudioPurpose::ClipSegment) {
         const RenderTask& task = m_renderTasks[m_taskIndex];
         emit logMessage(QString("Whisper (word-level) [%1] для клипа %2...")
@@ -429,7 +402,7 @@ void PipelineManager::onAudioExtracted(const QString& outPath)
         whisper.transcribe(task.wavPath, task.srtBase, task.lang, true);
     } else if (m_audioPurpose == AudioPurpose::Stories3Audio) {
         m_audioPurpose = AudioPurpose::None;
-        emit logMessage("Полное аудио готово, запускаю Пересказ 3.0...");
+        emit logMessage("Полное аудио готово, запускаю Пересказ V5...");
         S3Cache::writeMeta(outPath, m_s3AudioKey);
         m_s3.start(currentFilePath, currentInfo, outDir, tempDir, outPath, m_storyTranscriptLang);
     }
@@ -444,20 +417,16 @@ void PipelineManager::onTranscriptionDone(const QString& srtPath)
         m_missingSubsLangs.clear();
         m_audioPurpose = AudioPurpose::None;
         proceedToLlm();
-    } else if (m_audioPurpose == AudioPurpose::StoryTranscript) {
-        emit logMessage("Транскрипт фильма готов: " + srtPath);
-        onStoryTranscriptReady(srtPath);
     } else if (m_audioPurpose == AudioPurpose::ClipSegment) {
         m_audioPurpose = AudioPurpose::None;
         renderTaskWithSrt(srtPath);
     }
 }
 
-// ---------- Пересказ 3.0: чистый ASR + карта музыки + ревизор ----------
+// ---------- Пересказ V5: чистый ASR + карта музыки + ревизор ----------
 
 void PipelineManager::startStories3()
 {
-    if (m_mode == Mode::Stories4) emit logMessage("V4: истории по пайплайну V3; пословные субтитры и проверенные пояснения сцен (до 2 дополнительных LLM-запросов на языковую версию).");
     // дорожка: RU, затем EN, затем первая доступная (как в v2)
     int audioIndex = -1;
     if (currentInfo.rusAudioIndex >= 0)
@@ -480,12 +449,12 @@ void PipelineManager::startStories3()
          {"ffmpeg", AppSettings::instance().ffmpegPath}});
     const bool reuse = S3Cache::valid(wavPath, m_s3AudioKey);
     if (reuse) {
-        emit logMessage("Пересказ 3.0: аудио из кэша — " + wavPath);
+        emit logMessage("Пересказ V5: аудио из кэша — " + wavPath);
         m_s3.start(currentFilePath, currentInfo, outDir, tempDir, wavPath, m_storyTranscriptLang);
         return;
     }
 
-    emit logMessage(QString("Пересказ 3.0: извлекаю аудио 16 кГц моно (дорожка 0:a:%1)...")
+    emit logMessage(QString("Пересказ V5: извлекаю аудио 16 кГц моно (дорожка 0:a:%1)...")
                         .arg(audioIndex));
     m_audioPurpose = AudioPurpose::Stories3Audio;
     extractor.extractAudioWav(currentFilePath, audioIndex, wavPath);
@@ -526,143 +495,17 @@ void PipelineManager::loadS3Words()
         cue.text = w.trimmed();
         m_s3Words.append(cue);
     }
-    emit logMessage(QString("Пересказ 3.0: проверенных слов — %1.").arg(m_s3Words.size()));
+    emit logMessage(QString("Пересказ V5: проверенных слов — %1.").arg(m_s3Words.size()));
 }
 
 // ---------- Пересказ 2.0: транскрипт фильма ----------
-
-void PipelineManager::startStoryTranscript()
-{
-    // язык транскрипта: предпочитаем RU, затем EN, затем первую доступную дорожку
-    QString lang;
-    int audioIndex = -1;
-    if (currentInfo.rusAudioIndex >= 0) {
-        lang = "ru"; audioIndex = currentInfo.rusAudioIndex;
-    } else if (currentInfo.engAudioIndex >= 0) {
-        lang = "en"; audioIndex = currentInfo.engAudioIndex;
-    } else if (!currentInfo.audioTracks.isEmpty()) {
-        lang = currentInfo.audioTracks.first().language;
-        audioIndex = currentInfo.audioTracks.first().audioIndex;
-    }
-    if (audioIndex < 0) {
-        onErrorOccurred("Нет аудиодорожки для whisper-транскрибации фильма.");
-        return;
-    }
-    m_storyTranscriptLang = lang;
-
-    QFileInfo srcInfo(currentFilePath);
-    QString srtPath = tempDir + "/story_transcript_v2_" + lang + ".srt";
-    QFileInfo srtInfo(srtPath);
-    // кэш: не пересчитываем, если транскрипт свежее исходника (hard rule 9 video-use)
-    if (srtInfo.exists() && srtInfo.size() > 0 && srtInfo.lastModified() >= srcInfo.lastModified()) {
-        emit logMessage("Транскрипт из кэша: " + srtPath);
-        onStoryTranscriptReady(srtPath);
-        return;
-    }
-
-    QString wavPath = tempDir + "/story_full_audio.wav";
-    QFileInfo wavInfo(wavPath);
-    m_audioPurpose = AudioPurpose::StoryTranscript;
-    if (wavInfo.exists() && wavInfo.size() > 0 && wavInfo.lastModified() >= srcInfo.lastModified()) {
-        emit logMessage(QString("Полное аудио из кэша. Whisper word-level [%1] по всему фильму...")
-                            .arg(lang));
-        whisper.transcribe(wavPath, tempDir + "/story_transcript_v2_" + lang, lang, true);
-        return;
-    }
-
-    emit logMessage(QString("Извлекаю полное аудио (дорожка 0:a:%1)...").arg(audioIndex));
-    extractor.extractAudioWav(currentFilePath, audioIndex, wavPath);
-}
-
-// ---------- Пересказ 3.0: чистый ASR + карта музыки + ревизор ----------
-
-void PipelineManager::onStoryTranscriptReady(const QString& srtPath)
-{
-    m_audioPurpose = AudioPurpose::None;
-
-    // word-level реплики → слова для снаппинга и упаковки
-    m_cues = SrtUtils::parseFile(srtPath);
-    m_diarSegs.clear();
-
-    // whisper иногда растягивает слово на десятки секунд (DTW по музыке/тишине) —
-    // без правки это ломает и фразы, и границы клипов
-    const int fixed = SrtUtils::clampWordDurations(m_cues);
-    if (fixed > 0)
-        emit logMessage(QString("Выравнивание слов: исправлено %1 растянутых cue.").arg(fixed));
-
-    // защита от зацикливания whisper: вырожденный транскрипт нельзя отдавать в LLM —
-    // модель узнает фильм по названию и выдумает и сюжет, и цитаты, и таймкоды
-    const double uniq = SrtUtils::uniqueTextRatio(m_cues);
-    if (m_cues.size() >= 100 && uniq < 0.02) {
-        onErrorOccurred(QString("Whisper зациклился: в транскрипте %1 реплик, но уникальных "
-                                "текстов всего %2% — одна и та же фраза повторяется весь фильм. "
-                                "Такое бывает без флагов -mc 0 / --vad (теперь они включены всегда) "
-                                "или на проблемной модели/дорожке. Удали кэш транскрипта в папке "
-                                "temp и запусти заново; либо выбери источник транскрипта "
-                                "«Субтитры из файла».")
-                            .arg(m_cues.size())
-                            .arg(uniq * 100.0, 0, 'f', 2));
-        return;
-    }
-
-    const AppSettings& s = AppSettings::instance();
-    QString wavPath = tempDir + "/story_full_audio.wav";
-    QString diarJson = tempDir + "/story_diar.json";
-
-    // опциональная диаризация (pyannote через python)
-    if (s.diarizationEnabled && !s.pythonPath.isEmpty()) {
-        QFileInfo di(diarJson), srcInfo(currentFilePath);
-        if (di.exists() && di.size() > 0 && di.lastModified() >= srcInfo.lastModified()) {
-            emit logMessage("Диаризация из кэша: " + diarJson);
-            onDiarizationDone(diarJson);
-            return;
-        }
-        if (QFile::exists(wavPath)) {
-            emit logMessage("Диаризация pyannote (python, может занять минуты)...");
-            diarizer.diarize(wavPath, diarJson);
-            return;
-        }
-        emit logMessage("[ПРЕДУПРЕЖДЕНИЕ] Нет wav для диаризации, пропускаю.");
-    }
-
-    finishStoryPacking();
-}
-
-void PipelineManager::onDiarizationDone(const QString& jsonPath)
-{
-    m_diarSegs = DiarizeRunner::parseJson(jsonPath);
-    QSet<QString> speakers;
-    for (const DiarSegment& d : m_diarSegs)
-        speakers.insert(d.speaker);
-    emit logMessage(QString("Диаризация: %1 сегментов, %2 спикеров.")
-                        .arg(m_diarSegs.size()).arg(speakers.size()));
-    finishStoryPacking();
-}
-
-void PipelineManager::finishStoryPacking()
-{
-    const AppSettings& s = AppSettings::instance();
-    auto phrases = TranscriptPacker::pack(m_cues, s.editPauseSec, m_diarSegs, s.editMaxPhraseSec);
-    m_packedText = TranscriptPacker::toMarkdown(phrases);
-
-    // сохраняем packed-транскрипт рядом с клипами — полезно для отладки
-    QFile f(outDir + "/movie_packed.md");
-    if (f.open(QIODevice::WriteOnly)) {
-        f.write(m_packedText.toUtf8());
-        f.close();
-    }
-
-    emit logMessage(QString("Транскрипт упакован: %1 слов → %2 фраз (%3 символов).")
-                        .arg(m_cues.size()).arg(phrases.size()).arg(m_packedText.size()));
-    proceedToLlm();
-}
 
 void PipelineManager::proceedToLlm()
 {
     startLlmStage();
 }
 
-// ---------- Пересказ 3.0: свой путь (карта музыки + ASR чанками + ревизор) ----------
+// ---------- Пересказ V5: свой путь (карта музыки + ASR чанками + ревизор) ----------
 
 // ---------- Пересказ 2.0: агентный доступ к кадрам ----------
 
@@ -728,49 +571,14 @@ void PipelineManager::onFramesExtracted(const QString& dirPath)
         }
         if (!sheets.isEmpty()) frames = sheets;
     }
-    if (isNarrativeMode())
-        llm.deliverStoryFramesV3(frames);
-    else
-        llm.deliverStoryFrames(frames);
+    llm.deliverStoryFramesV3(frames);
 }
 
 // ---------- LLM ----------
 
 void PipelineManager::startLlmStage()
 {
-    if (m_mode == Mode::Highlights)
-        emit logMessage("Шаг 4/6: анализ в LLM (Аналитик → Скаут → Продюсер)...");
-    else
-        emit logMessage("Шаг 4/6: анализ в LLM (пересказ с драматургией, один запрос)...");
-
-    if (m_mode == Mode::Stories) {
-        const AppSettings& s = AppSettings::instance();
-
-        // источник транскрипта: whisper word-level (уже упакован) или сабы из файла
-        if (!s.storyWhisperTranscript) {
-            m_cues = SrtUtils::parseFile(m_subsPaths.value("ru"));
-            if (m_cues.isEmpty())
-                m_cues = SrtUtils::parseFile(m_subsPaths.value("en"));
-            if (m_cues.isEmpty()) {
-                onErrorOccurred("Нет текста субтитров для LLM-анализа.");
-                return;
-            }
-            auto phrases = TranscriptPacker::pack(m_cues, s.editPauseSec, s.editMaxPhraseSec);
-            m_packedText = TranscriptPacker::toMarkdown(phrases);
-            emit logMessage(QString("Сабы упакованы: %1 реплик → %2 фраз.")
-                                .arg(m_cues.size()).arg(phrases.size()));
-        }
-
-        if (m_packedText.trimmed().isEmpty()) {
-            onErrorOccurred("Пустой транскрипт для LLM-анализа.");
-            return;
-        }
-
-        // агентный режим: LLM сама запросит кадры нужных фрагментов
-        llm.findStories(currentInfo, m_packedText);
-        return;
-    }
-
+    emit logMessage("Шаг 4/6: поиск хайлайтов в LLM.");
     auto readSrt = [](const QString& path) -> QString {
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly))
@@ -827,49 +635,14 @@ void PipelineManager::onStoriesFound(const QList<StoryClip>& stories, const QJso
 {
     const AppSettings& s = AppSettings::instance();
 
-    // Пересказ 3.0: слова/фразы чище, чем у whisper, и приходят из своего SRT.
-    // Снаппинг делаем по ним же, чтобы не тянуть whisper-эвристики.
-    if (isNarrativeMode()) {
-        loadS3Words();
-        m_cues = m_s3Words;
-    }
-
-    // паддинги: whisper/ASR-режим — от границ фраз, subs-режим — от реплик
-    const bool wordLevel = s.storyWhisperTranscript || isNarrativeMode();
-    double padStart = wordLevel ? s.editPaddingMs / 1000.0 : s.padStartSec;
-    double padEnd   = wordLevel ? s.editPaddingMs / 1000.0 : s.padEndSec;
-
+    loadS3Words();
     m_stories.clear();
-    for (StoryClip story : stories) {
-        if (isNarrativeMode()) {
-            if (story.timelineHash.isEmpty() || story.timelineHash != StoryTimeline::hash(story)
-                || story.totalSec() < s.s3MinClipSec - .001 || story.totalSec() > s.s3MaxClipSec + .001) {
-                onErrorOccurred("V3: монтаж изменился после аудита или не прошёл компиляцию временной шкалы."); return;
-            }
-            m_stories.append(story); continue;
+    for (const auto& story : stories) {
+        if (story.timelineHash.isEmpty() || story.timelineHash != StoryTimeline::hash(story)
+            || story.totalSec() < s.s3MinClipSec - .001 || story.totalSec() > s.s3MaxClipSec + .001) {
+            onErrorOccurred("V5: монтаж изменился после проверки."); return;
         }
-        // снаппинг каждой склейки к границам слов/реплик
-        for (int si = 0; si < story.segments.size(); ++si) {
-            StorySegment& seg = story.segments[si];
-            auto sn = SrtUtils::snapSegment(seg.startSec, seg.endSec, m_cues,
-                                            padStart, padEnd, currentInfo.durationSec);
-            seg.startSec = sn.first;
-            seg.endSec = sn.second;
-        }
-        // хронологический порядок + слияние близких склеек (метаданные — от первой)
-        std::sort(story.segments.begin(), story.segments.end(),
-                  [](const StorySegment& a, const StorySegment& b) { return a.startSec < b.startSec; });
-        QList<StorySegment> merged;
-        for (const StorySegment& seg : story.segments) {
-            if (!merged.isEmpty() && seg.startSec - merged.last().endSec < s.mergeGapSec)
-                merged.last().endSec = qMax(merged.last().endSec, seg.endSec);
-            else
-                merged.append(seg);
-        }
-        story.segments = merged;
-
-        if (!story.segments.isEmpty())
-            m_stories.append(story);
+        m_stories.append(story);
     }
 
     emit logMessage(QString("LLM создала %1 пересказов (после снаппинга: %2).")
@@ -1012,18 +785,18 @@ void PipelineManager::processNextRenderTask()
 
     const RenderTask& task = m_renderTasks[m_taskIndex];
 
-    // Пересказ 3.0: субтитры клипа берём из чистого ASR-транскрипта,
+    // Пересказ V5: субтитры клипа берём из чистого ASR-транскрипта,
     // whisper для клипа не запускаем вовсе (он и был источником галлюцинаций).
     if (isNarrativeMode() && task.lang == m_storyTranscriptLang) {
         const QString s3Srt = buildS3ClipSrt(task, task.srtBase);
         if (!s3Srt.isEmpty()) {
-            emit logMessage(QString("Пересказ 3.0: клип %1/%2 на чистых сабах.")
+            emit logMessage(QString("Пересказ V5: клип %1/%2 на чистых сабах.")
                                 .arg(m_taskIndex + 1).arg(m_renderTasks.size()));
             m_audioPurpose = AudioPurpose::None;
             renderTaskWithSrt(s3Srt);
             return;
         }
-        onErrorOccurred("Пересказ 3.0: нет проверенных слов для выбранного фрагмента.");
+        onErrorOccurred("Пересказ V5: нет проверенных слов для выбранного фрагмента.");
         return;
     }
 
@@ -1034,7 +807,7 @@ void PipelineManager::processNextRenderTask()
                             .arg(m_taskIndex + 1).arg(m_renderTasks.size())
                             .arg(task.segments.size()).arg(task.lang));
         extractor.extractConcatAudioWav(currentFilePath, task.audioIndex, task.segments, task.wavPath,
-                                        storyTransitionSec());
+                                        0.0);
     } else {
         emit logMessage(QString("Клип %1/%2: извлечение аудио [%3]...")
                             .arg(m_taskIndex + 1).arg(m_renderTasks.size()).arg(task.lang));
@@ -1070,8 +843,6 @@ QString PipelineManager::buildS3ClipSrt(const RenderTask& task, const QString& s
     if (words.isEmpty() || task.segments.isEmpty())
         return QString();
 
-    const double xfade = task.segments.size() > 1 ? storyTransitionSec() : 0.0;
-
     QString out;
     int idx = 0;
     double offset = 0.0;
@@ -1096,10 +867,7 @@ QString PipelineManager::buildS3ClipSrt(const RenderTask& task, const QString& s
                        .arg(s3SrtTime(s0), s3SrtTime(s1), c.text.trimmed());
         }
 
-        // склейка: следующий сегмент начинается раньше на длину crossfade
         offset += dur;
-        if (si + 1 < task.segments.size())
-            offset -= xfade;
     }
 
     if (idx == 0)
@@ -1114,46 +882,39 @@ QString PipelineManager::buildS3ClipSrt(const RenderTask& task, const QString& s
     return path;
 }
 
-double PipelineManager::storyTransitionSec() const
-{
-    // Dialogue keeps its full timing. Brief edge audio fades are applied by the renderer.
-    return isNarrativeMode() ? 0.0 : AppSettings::instance().storyCrossfadeSec;
-}
-
 void PipelineManager::renderTaskWithSrt(const QString& srtPath)
 {
     if (m_taskIndex < 0 || m_taskIndex >= m_renderTasks.size())
         return;
     const RenderTask& task = m_renderTasks[m_taskIndex];
     QString subtitlePath = srtPath;
-    if (m_mode == Mode::Stories4 || m_mode == Mode::Stories5) {
+    if (m_mode == Mode::Stories5) {
         QList<double> cuts; double position = 0;
         for (int i = 0; i + 1 < task.segments.size(); ++i) {
             position += task.segments[i].second - task.segments[i].first; cuts.append(position);
         }
         const auto words = SrtUtils::parseFile(srtPath);
-        const QString assPath = task.srtBase + (m_mode == Mode::Stories5 ? ".v5.ass" : ".v4.ass");
+        const QString assPath = task.srtBase + ".v5.ass";
         const int taskIndex = m_taskIndex;
         const QString runDirectory = m_runLogDirectory;
-        const QString label = QString("%1 [%2, история %3]").arg(m_mode == Mode::Stories5 ? "V5" : "V4", task.lang).arg(task.clipIndex + 1);
+        const QString label = QString("V5 [%1, история %2]").arg(task.lang).arg(task.clipIndex + 1);
         const auto key = qMakePair(task.clipIndex, task.lang);
         QString translationLanguage;
-        if (m_mode == Mode::Stories5 && m_taskIndex + 1 < m_renderTasks.size()) {
+        if (m_taskIndex + 1 < m_renderTasks.size()) {
             const auto& next = m_renderTasks[m_taskIndex + 1];
             if (next.clipIndex == task.clipIndex && next.lang != task.lang) translationLanguage = next.lang;
         }
         auto compose = [this, words, cuts, assPath, taskIndex, runDirectory, label, translationLanguage](bool ok, const QList<SrtCue>& captions, const QString& error) {
             if (!m_fileActive || m_taskIndex != taskIndex || m_runLogDirectory != runDirectory) return;
-            if (!ok && m_mode == Mode::Stories5) emit logMessage(label + ": собираю черновик без пояснений. " + error);
-            else if (!ok) { onErrorOccurred("V4: пояснения сцен не прошли проверку: " + error); return; }
+            if (!ok) emit logMessage(label + ": собираю черновик без пояснений. " + error);
             if (!translationLanguage.isEmpty()) {
                 QList<SrtCue> translated;
                 for (const auto& cue : captions)
                     translated.append({cue.index, cue.startSec, cue.endSec, cue.translation});
                 m_translatedSceneCaptions.insert({m_renderTasks[taskIndex].clipIndex, translationLanguage}, translated);
             }
-            if (!SubtitleComposer::writeAssV4(words, captions, assPath, AppSettings::instance().s3SubtitleFontSize, cuts, m_mode == Mode::Stories5)) {
-                onErrorOccurred("V4: не удалось сохранить субтитры."); return;
+            if (!SubtitleComposer::writeAssV4(words, captions, assPath, AppSettings::instance().s3SubtitleFontSize, cuts, true)) {
+                onErrorOccurred("V5: не удалось сохранить субтитры."); return;
             }
             emit logMessage(label + QString(": пояснений в ролике — %1.").arg(captions.size()));
             renderTaskWithSubtitles(assPath);
@@ -1167,22 +928,6 @@ void PipelineManager::renderTaskWithSrt(const QString& srtPath)
         }
         return;
     }
-    if (isNarrativeMode()) {
-        subtitlePath = task.srtBase + ".readable.ass";
-        const auto& settings = AppSettings::instance();
-        QList<double> cuts;
-        double position = 0;
-        for (int i = 0; i + 1 < task.segments.size(); ++i) {
-            position += task.segments[i].second - task.segments[i].first;
-            cuts.append(position);
-        }
-        if (!SubtitleComposer::writeAss(SrtUtils::parseFile(srtPath), subtitlePath,
-                                        settings.s3SubtitleFontSize, settings.s3SubtitleWords, cuts)) {
-            onErrorOccurred("V3: не удалось сохранить оформленные субтитры.");
-            return;
-        }
-    }
-
     renderTaskWithSubtitles(subtitlePath);
 }
 
@@ -1199,18 +944,10 @@ void PipelineManager::renderTaskWithSubtitles(const QString& subtitlePath)
         renderer.renderV5Story(currentFilePath, task.segments, task.audioIndex, subtitlePath, task.outPath, plan, {}, room);
         return;
     }
-    if (task.isStory && task.segments.size() > 1) {
-        emit logMessage(QString("Рендер пересказа %1 [%2]...")
-                            .arg(task.clipIndex + 1).arg(task.lang));
-        renderer.renderStoryClip(currentFilePath, task.segments, task.audioIndex,
-                                 subtitlePath, task.outPath,
-                                  storyTransitionSec(), isNarrativeMode());
-    } else {
-        emit logMessage(QString("Рендер клипа %1 [%2]...")
-                            .arg(task.clipIndex + 1).arg(task.lang));
-        renderer.renderClip(currentFilePath, task.startSec, task.endSec, task.audioIndex,
-                            subtitlePath, task.outPath, isNarrativeMode());
-    }
+    emit logMessage(QString("Рендер клипа %1 [%2]...")
+                        .arg(task.clipIndex + 1).arg(task.lang));
+    renderer.renderClip(currentFilePath, task.startSec, task.endSec, task.audioIndex,
+                        subtitlePath, task.outPath, isNarrativeMode());
 }
 
 void PipelineManager::onClipRendered(const QString& outPath)

@@ -24,7 +24,7 @@ void prepareV3Source(const QString& settingsPath, const QString& source)
     if (!settings.load(settingsPath)) throw std::runtime_error("Cannot load settings");
     if (settings.s3ScriptsDir.isEmpty()) settings.s3ScriptsDir = QFileInfo(settingsPath).absolutePath() + "/scripts";
     settings.s3RunMode = AppSettings::StoryRunMode::Continue;
-    PipelineManager manager; manager.setMode(PipelineManager::Mode::Stories3); manager.setOfflinePreview(true);
+    PipelineManager manager; manager.setMode(PipelineManager::Mode::Stories5); manager.setOfflinePreview(true);
     QEventLoop loop; bool prepared = false;
     QObject::connect(&manager, &PipelineManager::logMessage, &loop, [&](const QString& text) {
         logLine(text); if (text.contains("OFFLINE_PREVIEW")) prepared = true;

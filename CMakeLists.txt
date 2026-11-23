@@ -34,8 +34,6 @@ if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
         whisperrunner.h whisperrunner.cpp
         cliprenderer.h cliprenderer.cpp
         srtutils.h srtutils.cpp
-        transcriptpacker.h transcriptpacker.cpp
-        diarizerunner.h diarizerunner.cpp
         stories3runner.h stories3runner.cpp
         stories3pipeline.h stories3pipeline.cpp
         s3cache.h s3cache.cpp
@@ -81,6 +79,7 @@ set_target_properties(content_clipper PROPERTIES
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
     MACOSX_BUNDLE TRUE
+    OUTPUT_NAME content_clipper_highlights_v5
     WIN32_EXECUTABLE TRUE
 )
 
@@ -102,7 +101,7 @@ if(CONTENT_CLIPPER_BUILD_TESTS)
     add_executable(test_stories3 tests/test_stories3.cpp tests/test_eventindex.cpp tests/test_storyprotocol.cpp tests/test_storyrunstore.cpp tests/test_storytimeline.cpp tests/test_storycontext.cpp tests/replay_v3_run.cpp tests/live_v3_run.cpp
         appsettings.cpp llmclient.cpp llmtransport.cpp storynarrative.cpp storytypes.h storyprotocol.cpp storyprotocol.h storyrunstore.cpp storyrunstore.h storytimeline.cpp storytimeline.h storycontext.cpp storycontext.h eventindex.cpp s3cache.cpp stories3runner.cpp stories3pipeline.cpp
         pipelinemanager.cpp mediaextractor.cpp metadataparser.cpp whisperrunner.cpp
-        cliprenderer.cpp srtutils.cpp subtitlecomposer.cpp transcriptpacker.cpp diarizerunner.cpp)
+        cliprenderer.cpp srtutils.cpp subtitlecomposer.cpp )
     target_include_directories(test_stories3 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     set_target_properties(test_stories3 PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/tests")
     target_compile_definitions(test_stories3 PRIVATE CLIPPER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")

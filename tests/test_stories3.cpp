@@ -600,6 +600,15 @@ counter.write_text(str(int(counter.read_text()) + 1 if counter.exists() else 1))
 path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':words,
  'quality':{'n_words':8,'unique_ratio':1}}), encoding='utf-8')
 )PY");
+    const auto framing = scripts + "/framing_fixture.py";
+    writeFile(framing, R"PY(
+import json, pathlib, sys
+times = sys.argv[5:sys.argv.index('--reaction-room')]
+filters = [f'[{i}:v:0]setpts=PTS-STARTPTS[vp{i}];' for i in range(len(times)//2)]
+pathlib.Path(sys.argv[2]).write_text(json.dumps(dict(filters=filters)))
+)PY");
+    qputenv("CLIPPER_V5_PYTHON", python.toUtf8());
+    qputenv("CLIPPER_V5_FRAMING_SCRIPT", framing.toUtf8());
     settings.s3ScriptsDir = scripts;
     settings.s3PythonPath = python;
     settings.s3AudioMapEngine = AppSettings::AudioMapEngine::Off;
@@ -616,7 +625,7 @@ path.write_text(json.dumps({'language':args.language,'audio_sec':7200,'words':wo
     const QString beta = temporary.filePath("beta.mkv");
     writeFile(alpha, "alpha"); writeFile(beta, "beta");
     PipelineManager manager;
-    manager.setMode(PipelineManager::Mode::Stories3);
+    manager.setMode(PipelineManager::Mode::Stories5);
     QStringList errors;
     QEventLoop queueLoop;
     QObject::connect(&manager, &PipelineManager::logMessage, &queueLoop, [&](const QString& message) {

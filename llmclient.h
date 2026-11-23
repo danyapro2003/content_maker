@@ -45,7 +45,6 @@ public:
     // Пайплайн «Пересказ 2.0»: агентный цикл.
     // LLM читает упакованный транскрипт, сама запрашивает кадры интересных ей фрагментов
     // (сигнал storyFramesRequested), смотрит их и выдаёт финальный EDL коротких моментов.
-    void findStories(const MediaInfo& info, const QString& packedTranscript);
 
     // V3: события -> замыслы -> монтаж -> зритель -> верность -> исправление.
     void findStoriesV3(const MediaInfo& info, const QString& packedTranscript,
@@ -71,7 +70,6 @@ public:
 
     // Ответ на storyFramesRequested: кадры (сек -> путь к jpg).
     // Пустой список — извлечь не удалось, агент продолжит без визуала.
-    void deliverStoryFrames(const QList<QPair<double, QString>>& frames);
 
     // Разбор агентного ответа: запрос кадров {"action":"get_frames","ranges":[...]}.
     // Диапазоны клампятся к durationSec и ограничиваются 300 с / 8 шт.
@@ -93,15 +91,12 @@ private:
     void runScout();
     void runNextScoutChunk();
     void runProducer(const QString& extraUserMsg = QString());
-    void runStoryTurn();
 
     void sendChat(const QJsonArray& messages,
                   const std::function<void(bool ok, const QString& content)>& callback,
                   const QString& stage = QStringLiteral("chat"));
 
     QList<Highlight> parseHighlights(const QString& text, QJsonArray& rawOut);
-    QList<StoryClip> parseStories(const QString& text, QJsonArray& rawOut,
-                                bool phraseReferences = false);
 
     // Пересказ 3.0
     void runStoryTurnV3();
@@ -177,7 +172,6 @@ private:
 
     MediaInfo m_info;
     QString m_subsText;      // объединённый текст сабов для LLM (по настройке)
-    QString m_packedText;    // упакованный транскрипт для пересказа
     QString m_synopsis;
     QString m_candidates;    // накопленные ответы Скаута
     QStringList m_scoutChunks;
@@ -186,10 +180,7 @@ private:
     QString m_producerUserMsg;
 
     // агентный диалог пересказа
-    QJsonArray m_storyMessages;  // полная история (system/user/assistant)
-    int m_storyTurn = 0;         // сколько раз LLM уже запрашивала кадры
     int m_storySent = 0;         // всего запросов к LLM (защита от вечного цикла)
-    bool m_storyRetried = false; // ретрай невалидного финального JSON
     bool m_awaitingFrames = false;
 };
 

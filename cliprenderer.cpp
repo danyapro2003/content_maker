@@ -175,9 +175,9 @@ void ClipRenderer::renderV5Story(const QString& source, const QList<QPair<double
         render(); return;
     }
     const auto dir = QCoreApplication::applicationDirPath();
-    const auto python = QDir(dir).absoluteFilePath("../v5_edit_env/Scripts/python.exe");
+    const auto python = qEnvironmentVariable("CLIPPER_V5_PYTHON", QDir(dir).absoluteFilePath("../v5_edit_env/Scripts/python.exe"));
     const auto& settings = AppSettings::instance();
-    QStringList args{dir + "/scripts/v5_framing.py", source, plan,
+    QStringList args{qEnvironmentVariable("CLIPPER_V5_FRAMING_SCRIPT", dir + "/scripts/v5_framing.py"), source, plan,
                      settings.s3ModelDir + "/face_detection_yunet_2023mar.onnx", settings.ffmpegPath};
     for (const auto& seg : segments)
         args << QString::number(seg.first, 'f', 3) << QString::number(seg.second, 'f', 3);
