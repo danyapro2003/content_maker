@@ -30,7 +30,7 @@ private slots:
     void on_start_pb_clicked();
 
 private:
-    void buildV5Tab();
+    void buildStoryOptions();
     void startQueue(PipelineManager::Mode mode, const QString& path);
     void buildSettingsTab();
     void loadSettingsToUi();
@@ -65,21 +65,17 @@ private:
 
     QDoubleSpinBox* spPadStart = nullptr;
     QDoubleSpinBox* spPadEnd = nullptr;
-    QDoubleSpinBox* spMergeGap = nullptr;
     QCheckBox* chkDtw = nullptr;
     QCheckBox* chkSendFrames = nullptr;
     QDoubleSpinBox* spFrameInterval = nullptr;
     QSpinBox* spAgentTurns = nullptr;
     QSpinBox* spAgentMaxFrames = nullptr;
-    QDoubleSpinBox* spCrossfade = nullptr;
     QSpinBox* spMinCuesPerHour = nullptr;
 
-    QComboBox* cmbStoryTranscript = nullptr;
     QDoubleSpinBox* spEditPause = nullptr;
     QDoubleSpinBox* spEditMaxPhrase = nullptr;
     QSpinBox* spEditPadding = nullptr;
     QSpinBox* spEditFade = nullptr;
-    QCheckBox* chkDiarization = nullptr;
     QLineEdit* lePythonPath = nullptr;
     QLineEdit* leHfToken = nullptr;
     QLineEdit* lePyannoteModel = nullptr;
@@ -110,7 +106,6 @@ private:
     QSpinBox* spS3MaxSegments = nullptr;
     QSpinBox* spS3MaxSegmentSec = nullptr;
     QSpinBox* spS3SubtitleFontSize = nullptr;
-    QSpinBox* spS3SubtitleWords = nullptr;
     QComboBox* cbS3RunMode = nullptr;
     QSpinBox* spS3Requests = nullptr;
     QCheckBox* chkS3Partial = nullptr;

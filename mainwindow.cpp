@@ -71,7 +71,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->clips_tw->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
 
     AppSettings::instance().load();
-    buildV5Tab();
+    buildStoryOptions();
     buildSettingsTab();
     loadSettingsToUi();
 }
@@ -120,7 +120,7 @@ void MainWindow::on_browse_file_pb_clicked()
 
     QString filePath = QFileDialog::getOpenFileName(
         this, "Выбрать видеофайл", lastPath,
-        "Видео (*.mkv *.mp4 *.m4v *.avi);;Все файлы (*.*)");
+        "Видео (*.mkv *.mp4 *.m4v *.avi *.webm);;Все файлы (*.*)");
 
     if (!filePath.isEmpty()) {
         ui->browse_le->setText(filePath);
@@ -143,76 +143,42 @@ void MainWindow::on_browse_folder_pb_clicked()
     }
 }
 
-void MainWindow::buildV5Tab()
+void MainWindow::buildStoryOptions()
 {
-    auto* page = new QWidget;
-    ui->tabWidget->addTab(page, "Пересказ V5");
-    auto* layout = new QVBoxLayout(page);
-    auto* row = new QHBoxLayout;
-    layout->addLayout(row);
-    auto* path = new QLineEdit(ui->browse_le->text(), page);
-    path->setPlaceholderText("Исходный фильм");
-    row->addWidget(path);
-    auto* browse = new QPushButton("Файл…", page);
-    row->addWidget(browse);
-    connect(browse, &QPushButton::clicked, page, [this, path]() {
-        const auto file = QFileDialog::getOpenFileName(this, "Исходный фильм", path->text(), "Видео (*.mkv *.mp4 *.avi *.m4v *.webm)");
-        if (!file.isEmpty()) path->setText(file);
-    });
-    auto* musicRow = new QHBoxLayout;
-    layout->addLayout(musicRow);
-    auto* background = new QCheckBox("Подбирать фоновую музыку из библиотеки", page);
-    musicRow->addWidget(background);
-    auto* library = new QPushButton("Библиотека музыки…", page);
-    musicRow->addWidget(library);
-    auto* window = new QProcess(page);
-    connect(library, &QPushButton::clicked, page, [window, library]() {
+    auto* options = new QWidget(ui->tab_pipeline);
+    auto* row = new QHBoxLayout(options);
+    row->setContentsMargins(0, 0, 0, 0);
+    auto* background = new QCheckBox("Подбирать фоновую музыку", options);
+    row->addWidget(background);
+    connect(background, &QCheckBox::toggled, Manager, &PipelineManager::setV5Background);
+    auto* library = new QPushButton("Библиотека музыки…", options);
+    row->addWidget(library);
+    auto* window = new QProcess(options);
+    connect(library, &QPushButton::clicked, options, [window, library]() {
         const QDir dir(QCoreApplication::applicationDirPath());
         library->setEnabled(false);
         window->start(dir.absoluteFilePath("../v5_edit_env/Scripts/pythonw.exe"),
                       {dir.filePath("scripts/v5_music_window.py"), AppSettings::instance().settingsFilePath()});
     });
-    auto* start = new QPushButton("Подобрать истории и собрать черновики", page);
-    layout->addWidget(start);
-    auto* log = new QPlainTextEdit(page);
-    log->setReadOnly(true); layout->addWidget(log);
-    connect(window, &QProcess::finished, page, [window, log, library](int code, QProcess::ExitStatus) {
+    connect(window, &QProcess::finished, this, [this, library, window](int code, QProcess::ExitStatus) {
         library->setEnabled(true);
-        if (code) log->appendPlainText(timedLog("Ошибка библиотеки: " + QString::fromUtf8(window->readAllStandardError()).right(800)));
+        if (code) appendLog("Ошибка библиотеки: " + QString::fromUtf8(window->readAllStandardError()).right(800));
     });
-    connect(window, &QProcess::errorOccurred, page, [window, library, log](QProcess::ProcessError) {
-        library->setEnabled(true); log->appendPlainText(timedLog("Ошибка запуска библиотеки: " + window->errorString()));
+    connect(window, &QProcess::errorOccurred, this, [this, library, window](QProcess::ProcessError) {
+        library->setEnabled(true); appendLog(window->errorString());
     });
-    auto* clips = new QListWidget(page);
-    layout->addWidget(clips);
-    connect(start, &QPushButton::clicked, page, [this, path, background, log, clips, start]() {
-        if (!ui->start_pb->isEnabled()) { log->appendPlainText(timedLog("Дождитесь завершения текущей очереди.")); return; }
-        if (!QFileInfo(path->text().trimmed()).isFile()) { log->appendPlainText(timedLog("Выберите исходный фильм.")); return; }
-        Manager->setV5Background(background->isChecked());
-        clips->clear(); log->clear(); start->setEnabled(false);
-        startQueue(PipelineManager::Mode::Stories5, path->text().trimmed());
-    });
-    connect(Manager, &PipelineManager::logMessage, page, [log, start](const QString& msg) {
-        if (!start->isEnabled()) log->appendPlainText(timedLog(msg));
-    });
-    connect(Manager, &PipelineManager::queueSummaryReady, page, [clips, start](const QueueRunSummary& summary) {
-        if (!start->isEnabled()) clips->addItems(summary.outputs());
-    });
-    connect(Manager, &PipelineManager::queueFinished, page, [start]() { start->setEnabled(true); });
-    connect(clips, &QListWidget::itemActivated, page, [](QListWidgetItem* item) {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(item->text()));
-    });
+    row->addStretch();
+    ui->pipelineLayout->insertWidget(2, options);
+    options->hide();
+    connect(ui->mode_cb, &QComboBox::currentIndexChanged, options, [options](int index) { options->setVisible(index == 1); });
+    connect(ui->start_pb, &QPushButton::clicked, options, [this, options]() { options->setEnabled(ui->start_pb->isEnabled()); });
+    connect(Manager, &PipelineManager::queueFinished, options, [options]() { options->setEnabled(true); });
 }
 
 void MainWindow::on_start_pb_clicked()
 {
-    const bool isStory = ui->mode_cb->currentIndex() >= 1;
-    startQueue(ui->mode_cb->currentIndex() == 1
-                         ? PipelineManager::Mode::Stories
-                         : ui->mode_cb->currentIndex() == 3 ? PipelineManager::Mode::Stories4
-                         : isStory
-                               ? PipelineManager::Mode::Stories3
-                               : PipelineManager::Mode::Highlights, ui->browse_le->text().trimmed());
+    startQueue(ui->mode_cb->currentIndex() == 1 ? PipelineManager::Mode::Stories5 : PipelineManager::Mode::Highlights,
+               ui->browse_le->text().trimmed());
 }
 
 void MainWindow::startQueue(PipelineManager::Mode mode, const QString& path)
@@ -242,7 +208,7 @@ void MainWindow::startQueue(PipelineManager::Mode mode, const QString& path)
     if (fi.isFile()) {
         filesToProcess << fi.absoluteFilePath();
     } else if (fi.isDir()) {
-        QStringList filters{"*.mkv", "*.mp4", "*.m4v", "*.avi"};
+        QStringList filters{"*.mkv", "*.mp4", "*.m4v", "*.avi", "*.webm"};
         QDirIterator it(path, filters, QDir::Files | QDir::NoSymLinks);
         while (it.hasNext())
             filesToProcess.append(it.next());
@@ -278,9 +244,15 @@ void MainWindow::fillStoriesTable(const QList<StoryClip>& stories)
 // ---------- вкладка настроек ----------
 void MainWindow::buildSettingsTab()
 {
-    QFormLayout* form = new QFormLayout;
+    auto* form = new QFormLayout;
+    auto* highlightsBox = new QGroupBox("Хайлайты");
+    auto* highlights = new QFormLayout(highlightsBox);
+    auto* storyBox = new QGroupBox("Пересказ");
+    auto* story = new QFormLayout(storyBox);
+    auto* advancedBox = new QWidget;
+    auto* advanced = new QFormLayout(advancedBox);
 
-    auto pathRow = [this, form](const QString& label, QLineEdit*& le, bool isFile, const QString& filter = QString()) {
+    auto pathRow = [this, advanced](const QString& label, QLineEdit*& le, bool isFile, const QString& filter = QString()) {
         le = new QLineEdit(this);
         QPushButton* btn = new QPushButton("...", this);
         btn->setFixedWidth(30);
@@ -294,7 +266,7 @@ void MainWindow::buildSettingsTab()
             if (!p.isEmpty())
                 le->setText(p);
         });
-        form->addRow(label, row);
+        advanced->addRow(label, row);
     };
 
     pathRow("ffprobe:", leFfprobe, true, "ffprobe (ffprobe.exe);;Все файлы (*.*)");
@@ -314,19 +286,19 @@ void MainWindow::buildSettingsTab()
     spLlmMaxOutput->setRange(1, 1000000);
     spLlmMaxOutput->setToolTip("Верхний предел генерации (max_completion_tokens), включая рассуждения. "
                               "Допустимое значение зависит от модели и API-провайдера.");
-    form->addRow("Максимум выходных токенов:", spLlmMaxOutput);
+    advanced->addRow("Максимум выходных токенов:", spLlmMaxOutput);
     spLlmTimeout = new QSpinBox(this);
     spLlmTimeout->setRange(1, 60);
     spLlmTimeout->setSuffix(" мин");
     spLlmTimeout->setToolTip("Сколько ждать один ответ. После тайм-аута запрос автоматически не повторяется: "
                             "сервер мог продолжить генерацию и учесть её расход.");
-    form->addRow("Ожидание ответа LLM:", spLlmTimeout);
+    advanced->addRow("Ожидание ответа LLM:", spLlmTimeout);
 
     cbSubsForLlm = new QComboBox(this);
     cbSubsForLlm->addItem("Русские + Английские", "both");
     cbSubsForLlm->addItem("Только русские", "ru");
     cbSubsForLlm->addItem("Только английские", "en");
-    form->addRow("Субтитры для LLM:", cbSubsForLlm);
+    highlights->addRow("Субтитры для LLM:", cbSubsForLlm);
 
     chkRenderRu = new QCheckBox("Рендерить русские версии", this);
     form->addRow(chkRenderRu);
@@ -334,85 +306,72 @@ void MainWindow::buildSettingsTab()
     form->addRow(chkRenderEn);
 
     spMinClips = new QSpinBox(this); spMinClips->setRange(1, 20);
-    form->addRow("Мин. клипов / историй V3:", spMinClips);
+    form->addRow("Мин. роликов:", spMinClips);
     spMaxClips = new QSpinBox(this); spMaxClips->setRange(1, 20);
-    form->addRow("Макс. клипов / историй V3:", spMaxClips);
+    form->addRow("Макс. роликов:", spMaxClips);
     spMinSec = new QSpinBox(this); spMinSec->setRange(5, 600); spMinSec->setSuffix(" сек");
-    form->addRow("Мин. длина клипа:", spMinSec);
+    highlights->addRow("Мин. длина клипа:", spMinSec);
     spMaxSec = new QSpinBox(this); spMaxSec->setRange(10, 1200); spMaxSec->setSuffix(" сек");
-    form->addRow("Макс. длина клипа:", spMaxSec);
+    highlights->addRow("Макс. длина клипа:", spMaxSec);
     spChunkChars = new QSpinBox(this); spChunkChars->setRange(5000, 500000); spChunkChars->setSingleStep(5000);
     spChunkChars->setSuffix(" симв.");
-    form->addRow("Размер чанка Скаута:", spChunkChars);
+    advanced->addRow("Размер чанка Скаута:", spChunkChars);
 
     leSubtitleStyle = new QLineEdit(this);
     leSubtitleStyle->setToolTip("ASS force_style. Пример: FontName=Segoe UI,FontSize=14,Bold=0,"
                                 "PrimaryColour=&H00FFFFFF,Outline=0,Shadow=0,Alignment=2,MarginV=80");
-    form->addRow("Стиль субтитров:", leSubtitleStyle);
+    advanced->addRow("Стиль субтитров:", leSubtitleStyle);
 
     spPadStart = new QDoubleSpinBox(this); spPadStart->setRange(0.0, 2.0); spPadStart->setSingleStep(0.05); spPadStart->setSuffix(" с");
-    form->addRow("Паддинг начала сегмента:", spPadStart);
+    advanced->addRow("Паддинг начала сегмента:", spPadStart);
     spPadEnd = new QDoubleSpinBox(this); spPadEnd->setRange(0.0, 2.0); spPadEnd->setSingleStep(0.05); spPadEnd->setSuffix(" с");
-    form->addRow("Паддинг конца сегмента:", spPadEnd);
-    spMergeGap = new QDoubleSpinBox(this); spMergeGap->setRange(0.0, 5.0); spMergeGap->setSingleStep(0.1); spMergeGap->setSuffix(" с");
-    form->addRow("Слияние склеек ближе чем:", spMergeGap);
+    advanced->addRow("Паддинг конца сегмента:", spPadEnd);
 
     chkDtw = new QCheckBox("Точное выравнивание сабов (whisper DTW)", this);
     chkDtw->setToolTip("Более точные word-таймкоды, чуть медленнее");
-    form->addRow(chkDtw);
+    advanced->addRow(chkDtw);
     chkSendFrames = new QCheckBox("LLM сама запрашивает кадры фрагментов (агент)", this);
     chkSendFrames->setToolTip("Вместо нарезки всего фильма модель читает транскрипт, намечает\n"
                               "кандидатов и просит показать кадры именно этих фрагментов.\n"
                               "Требует мультимодальной LLM (Kimi, GPT-4o, Qwen-VL и т.п.).");
-    form->addRow(chkSendFrames);
+    advanced->addRow(chkSendFrames);
     spFrameInterval = new QDoubleSpinBox(this); spFrameInterval->setRange(0.5, 10.0);
     spFrameInterval->setSingleStep(0.5); spFrameInterval->setSuffix(" с");
     spFrameInterval->setToolTip("Плотность кадров в запрошенном агентом фрагменте");
-    form->addRow("Кадр каждые:", spFrameInterval);
+    advanced->addRow("Кадр каждые:", spFrameInterval);
     spAgentTurns = new QSpinBox(this); spAgentTurns->setRange(1, 12);
-    form->addRow("Запросов кадров:", spAgentTurns);
+    advanced->addRow("Запросов кадров:", spAgentTurns);
     spAgentMaxFrames = new QSpinBox(this); spAgentMaxFrames->setRange(5, 200);
     spAgentMaxFrames->setToolTip("Лимит кадров на один запрос (больше — плотнее интервал)");
-    form->addRow("Кадров на запрос:", spAgentMaxFrames);
-    spCrossfade = new QDoubleSpinBox(this); spCrossfade->setRange(0.0, 1.0); spCrossfade->setSingleStep(0.05); spCrossfade->setSuffix(" с");
-    spCrossfade->setToolTip("0 — без переходов");
-    form->addRow("Кроссфейд склеек:", spCrossfade);
+    advanced->addRow("Кадров на запрос:", spAgentMaxFrames);
 
     spMinCuesPerHour = new QSpinBox(this); spMinCuesPerHour->setRange(0, 1000); spMinCuesPerHour->setSuffix(" /час");
     spMinCuesPerHour->setToolTip("Дорожка сабов с меньшей плотностью считается forced и отбраковывается.\n"
                                  "Полные сабы: 500–1500/час, forced: < 50/час. 0 — проверка выкл.");
-    form->addRow("Мин. плотность сабов:", spMinCuesPerHour);
+    advanced->addRow("Мин. плотность сабов:", spMinCuesPerHour);
 
-    cmbStoryTranscript = new QComboBox(this);
-    cmbStoryTranscript->addItem("Whisper по всему фильму (точно, медленно)");
-    cmbStoryTranscript->addItem("Субтитры из файла (быстро)");
-    cmbStoryTranscript->setToolTip("Источник транскрипта для пересказа: whisper word-level даёт точные\n"
-                                   "границы слов (кэшируется), сабы — точность до реплики.");
-    form->addRow("Транскрипт пересказа:", cmbStoryTranscript);
     spEditPause = new QDoubleSpinBox(this); spEditPause->setRange(0.1, 2.0); spEditPause->setSingleStep(0.1); spEditPause->setSuffix(" с");
-    form->addRow("Разрыв фразы от паузы:", spEditPause);
+    advanced->addRow("Разрыв фразы от паузы:", spEditPause);
     spEditMaxPhrase = new QDoubleSpinBox(this); spEditMaxPhrase->setRange(4.0, 40.0);
     spEditMaxPhrase->setSingleStep(1.0); spEditMaxPhrase->setSuffix(" с");
     spEditMaxPhrase->setToolTip("В плотных диалогах пауз почти нет, поэтому фразы режутся ещё и по длине.\n"
                                 "Рвём на границе предложения, как только фраза набрала 40% этой длины.");
-    form->addRow("Макс. длина фразы:", spEditMaxPhrase);
+    advanced->addRow("Макс. длина фразы:", spEditMaxPhrase);
     spEditPadding = new QSpinBox(this); spEditPadding->setRange(0, 500); spEditPadding->setSuffix(" мс");
-    form->addRow("Паддинг склеек (whisper):", spEditPadding);
+    advanced->addRow("Паддинг склеек (whisper):", spEditPadding);
     spEditFade = new QSpinBox(this); spEditFade->setRange(0, 100); spEditFade->setSuffix(" мс");
     spEditFade->setToolTip("Аудио-фейды на границах склеек, убирают щелчки. 0 — выкл.");
-    form->addRow("Фейд на склейках:", spEditFade);
+    advanced->addRow("Фейд на склейках:", spEditFade);
 
-    chkDiarization = new QCheckBox("Диаризация спикеров (pyannote, требует python+HF токен)", this);
-    form->addRow(chkDiarization);
     lePythonPath = new QLineEdit(this);
-    form->addRow("Python (venv):", lePythonPath);
+    advanced->addRow("Python (venv):", lePythonPath);
     leHfToken = new QLineEdit(this); leHfToken->setEchoMode(QLineEdit::Password);
-    form->addRow("Hugging Face токен:", leHfToken);
+    advanced->addRow("Hugging Face токен:", leHfToken);
     lePyannoteModel = new QLineEdit(this);
-    form->addRow("Модель pyannote:", lePyannoteModel);
+    advanced->addRow("Модель pyannote:", lePyannoteModel);
 
     // ---------- Пересказ 3.0 ----------
-    QGroupBox* s3Box = new QGroupBox("Пересказ 3.0 — сюжетная ветка", this);
+    QGroupBox* s3Box = new QGroupBox("Пересказ V5", this);
     QFormLayout* s3 = new QFormLayout(s3Box);
 
     cbS3Asr = new QComboBox(this);
@@ -529,12 +488,12 @@ void MainWindow::buildSettingsTab()
     spS3MinClip = new QSpinBox(this);
     spS3MinClip->setRange(5, 300);
     spS3MinClip->setSuffix(" с");
-    s3->addRow("Мин. длина клипа:", spS3MinClip);
+    story->addRow("Мин. длина клипа:", spS3MinClip);
 
     spS3MaxClip = new QSpinBox(this);
     spS3MaxClip->setRange(10, 600);
     spS3MaxClip->setSuffix(" с");
-    s3->addRow("Макс. длина клипа:", spS3MaxClip);
+    story->addRow("Макс. длина клипа:", spS3MaxClip);
 
     spS3MaxSpan = new QSpinBox(this);
     spS3MaxSpan->setRange(0, 86400);
@@ -549,16 +508,13 @@ void MainWindow::buildSettingsTab()
     s3->addRow("Макс. склеек в клипе:", spS3MaxSegments);
     spS3MaxSegmentSec = new QSpinBox(this);
     spS3MaxSegmentSec->setRange(8, 90); spS3MaxSegmentSec->setSuffix(" с");
-    s3->addRow("Ориентир длины блока V3:", spS3MaxSegmentSec);
+    s3->addRow("Ориентир длины блока:", spS3MaxSegmentSec);
     spS3SubtitleFontSize = new QSpinBox(this);
     spS3SubtitleFontSize->setRange(32, 90); spS3SubtitleFontSize->setSuffix(" px");
-    s3->addRow("Размер субтитров V3:", spS3SubtitleFontSize);
-    spS3SubtitleWords = new QSpinBox(this);
-    spS3SubtitleWords->setRange(1, 6);
-    s3->addRow("Слов в строке V3:", spS3SubtitleWords);
+    story->addRow("Размер субтитров:", spS3SubtitleFontSize);
     cbS3RunMode = new QComboBox(this);
     cbS3RunMode->addItems({"Продолжить анализ", "Пересобрать истории по готовой карте", "Полный анализ LLM"});
-    s3->addRow("Режим запуска:", cbS3RunMode);
+    story->addRow("Режим запуска:", cbS3RunMode);
     spS3Requests = new QSpinBox(this); spS3Requests->setRange(1, 500);
     s3->addRow("Лимит API-запросов на файл:", spS3Requests);
     chkS3Partial = new QCheckBox("Сохранять годные истории при недоборе количества", this);
@@ -573,7 +529,7 @@ void MainWindow::buildSettingsTab()
         if (directory.isEmpty()) return;
         Manager->setImportLogDirectory(directory);
         cbS3RunMode->setCurrentIndex(1);
-        appendLog("При следующем запуске V3 проверю и импортирую карту: " + directory);
+        appendLog("При следующем запуске V5 проверю и импортирую карту: " + directory);
     });
     auto* checkModel = new QPushButton("Проверить формат LLM (до 2 API-запросов)", this);
     s3->addRow(checkModel);
@@ -595,14 +551,23 @@ void MainWindow::buildSettingsTab()
         saveSettingsFromUi();
         appendLog("Настройки сохранены в " + AppSettings::instance().settingsFilePath());
     });
-    form->addRow(saveBtn);
+
 
     // настроек много — общий контейнер с прокруткой
     QWidget* content = new QWidget(this);
     m_settingsContent = content;
     QVBoxLayout* outer = new QVBoxLayout(content);
     outer->addLayout(form);
+    outer->addWidget(highlightsBox);
+    outer->addWidget(storyBox);
+    auto* more = new QCheckBox("Дополнительные настройки");
+    outer->addWidget(more);
+    outer->addWidget(advancedBox);
     outer->addWidget(s3Box);
+    advancedBox->hide(); s3Box->hide();
+    connect(more, &QCheckBox::toggled, advancedBox, &QWidget::setVisible);
+    connect(more, &QCheckBox::toggled, s3Box, &QWidget::setVisible);
+    outer->addWidget(saveBtn);
     outer->addStretch();
 
     QScrollArea* scroll = new QScrollArea(this);
@@ -640,20 +605,16 @@ void MainWindow::loadSettingsToUi()
     leSubtitleStyle->setText(s.subtitleStyle);
     spPadStart->setValue(s.padStartSec);
     spPadEnd->setValue(s.padEndSec);
-    spMergeGap->setValue(s.mergeGapSec);
     chkDtw->setChecked(s.whisperDtw);
     chkSendFrames->setChecked(s.agentFramesEnabled);
     spFrameInterval->setValue(s.agentFrameIntervalSec);
     spAgentTurns->setValue(s.agentMaxTurns);
     spAgentMaxFrames->setValue(s.agentMaxFramesPerTurn);
-    spCrossfade->setValue(s.storyCrossfadeSec);
     spMinCuesPerHour->setValue(s.minSubsCuesPerHour);
-    cmbStoryTranscript->setCurrentIndex(s.storyWhisperTranscript ? 0 : 1);
     spEditPause->setValue(s.editPauseSec);
     spEditMaxPhrase->setValue(s.editMaxPhraseSec);
     spEditPadding->setValue(s.editPaddingMs);
     spEditFade->setValue(s.editAudioFadeMs);
-    chkDiarization->setChecked(s.diarizationEnabled);
     lePythonPath->setText(s.pythonPath);
     leHfToken->setText(s.hfToken);
     lePyannoteModel->setText(s.pyannoteModel);
@@ -687,7 +648,6 @@ void MainWindow::loadSettingsToUi()
     spS3MaxSegments->setValue(s.s3MaxSegments);
     spS3MaxSegmentSec->setValue(int(s.s3MaxSegmentSec));
     spS3SubtitleFontSize->setValue(s.s3SubtitleFontSize);
-    spS3SubtitleWords->setValue(s.s3SubtitleWords);
 }
 
 void MainWindow::saveSettingsFromUi()
@@ -719,20 +679,16 @@ void MainWindow::saveSettingsFromUi()
     s.subtitleStyle = leSubtitleStyle->text().trimmed();
     s.padStartSec = spPadStart->value();
     s.padEndSec = spPadEnd->value();
-    s.mergeGapSec = spMergeGap->value();
     s.whisperDtw = chkDtw->isChecked();
     s.agentFramesEnabled = chkSendFrames->isChecked();
     s.agentFrameIntervalSec = spFrameInterval->value();
     s.agentMaxTurns = spAgentTurns->value();
     s.agentMaxFramesPerTurn = spAgentMaxFrames->value();
-    s.storyCrossfadeSec = spCrossfade->value();
     s.minSubsCuesPerHour = spMinCuesPerHour->value();
-    s.storyWhisperTranscript = (cmbStoryTranscript->currentIndex() == 0);
     s.editPauseSec = spEditPause->value();
     s.editMaxPhraseSec = spEditMaxPhrase->value();
     s.editPaddingMs = spEditPadding->value();
     s.editAudioFadeMs = spEditFade->value();
-    s.diarizationEnabled = chkDiarization->isChecked();
     s.pythonPath = lePythonPath->text().trimmed();
     s.hfToken = leHfToken->text().trimmed();
     s.pyannoteModel = lePyannoteModel->text().trimmed();
@@ -775,6 +731,5 @@ void MainWindow::saveSettingsFromUi()
     s.s3MaxSegments = spS3MaxSegments->value();
     s.s3MaxSegmentSec = spS3MaxSegmentSec->value();
     s.s3SubtitleFontSize = spS3SubtitleFontSize->value();
-    s.s3SubtitleWords = spS3SubtitleWords->value();
     s.save();
 }

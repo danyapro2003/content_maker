@@ -3,6 +3,7 @@
 #include "appsettings.h"
 #include <QCoreApplication>
 #include <QFile>
+#include <QSaveFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 
@@ -14,7 +15,7 @@ AppSettings& AppSettings::instance()
 
 QString AppSettings::settingsFilePath() const
 {
-    return QCoreApplication::applicationDirPath() + "/settings.json";
+    return QCoreApplication::applicationDirPath() + "/settings-highlights-v5.json";
 }
 
 static QString subsToStr(AppSettings::SubsForLlm v)
@@ -91,6 +92,10 @@ static AppSettings::DiarEngine strToDiar(const QString& s)
 
 bool AppSettings::load(const QString& path)
 {
+    if (path.isEmpty() && !QFile::exists(settingsFilePath())) {
+        const QString previous = QCoreApplication::applicationDirPath() + "/settings.json";
+        if (QFile::exists(previous)) return load(previous) && save();
+    }
     QFile f(path.isEmpty() ? settingsFilePath() : path);
     if (!f.open(QIODevice::ReadOnly))
         return false;
@@ -262,9 +267,9 @@ bool AppSettings::save() const
     o["s3SubtitleWords"]   = s3SubtitleWords;
     o["s3NarrativeVersion"] = 1;
 
-    QFile f(settingsFilePath());
+    QSaveFile f(settingsFilePath());
     if (!f.open(QIODevice::WriteOnly))
         return false;
-    f.write(QJsonDocument(o).toJson(QJsonDocument::Indented));
-    return true;
+    const auto data = QJsonDocument(o).toJson(QJsonDocument::Indented);
+    return f.write(data) == data.size() && f.commit();
 }

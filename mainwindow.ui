@@ -11,7 +11,7 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>Content Clipper</string>
+   <string>Content Clipper — Хайлайты и Пересказ V5</string>
   </property>
   <widget class="QWidget" name="centralwidget">
    <layout class="QVBoxLayout" name="verticalLayout">
@@ -54,32 +54,14 @@
          <layout class="QHBoxLayout" name="startLayout">
           <item>
            <widget class="QComboBox" name="mode_cb">
-            <item>
-             <property name="text">
-              <string>Хайлайты (виральные моменты)</string>
-             </property>
-            </item>
-            <item>
-             <property name="text">
-              <string>Пересказ (история из склеек)</string>
-             </property>
-            </item>
-            <item>
-             <property name="text">
-              <string>Пересказ 3.0 (чистый транскрипт)</string>
-             </property>
-            </item>
-            <item>
-             <property name="text">
-              <string>Пересказ 4.0 (слова + пояснения сцен)</string>
-             </property>
-            </item>
+            <item><property name="text"><string>Хайлайты</string></property></item>
+            <item><property name="text"><string>Пересказ</string></property></item>
            </widget>
           </item>
           <item>
            <widget class="QPushButton" name="start_pb">
             <property name="text">
-             <string>Старт пайплайна</string>
+             <string>Запустить</string>
             </property>
            </widget>
           </item>
