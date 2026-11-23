@@ -30,6 +30,8 @@ private slots:
     void on_start_pb_clicked();
 
 private:
+    void buildV5Tab();
+    void startQueue(PipelineManager::Mode mode, const QString& path);
     void buildSettingsTab();
     void loadSettingsToUi();
     void saveSettingsFromUi();
@@ -95,6 +97,7 @@ private:
     QDoubleSpinBox* spS3ReviewChunk = nullptr;
     QDoubleSpinBox* spS3ReviewAgree = nullptr;
     QDoubleSpinBox* spS3DiarThreshold = nullptr;
+    QComboBox* cbSherpaDevice = nullptr;
     QSpinBox* spS3DiarThreads = nullptr;
     QCheckBox* chkS3DropMusicLowConf = nullptr;
     QDoubleSpinBox* spS3MinLogprob = nullptr;

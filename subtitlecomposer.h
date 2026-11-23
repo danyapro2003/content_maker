@@ -5,7 +5,7 @@
 
 namespace SubtitleComposer {
 bool writeAssV4(const QList<SrtCue>& words, const QList<SrtCue>& captions, const QString& path,
-                int fontSize = 64, const QList<double>& cuts = {});
+                int fontSize = 64, const QList<double>& cuts = {}, bool revealPhrase = false);
 QList<SrtCue> readablePhrases(const QList<SrtCue>& words, int maxWords = 4,
                              const QList<double>& cuts = {});
 bool writeAss(const QList<SrtCue>& words, const QString& path, int fontSize = 58, int maxWords = 4,

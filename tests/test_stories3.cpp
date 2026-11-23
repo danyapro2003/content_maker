@@ -78,7 +78,7 @@ public:
     bool invalidEdits = false;
     bool visualPlan = false, visualUnresolved = false;
     int replans = 0;
-    bool badCaption = false, captionAuditFail = false, lateCaption = false;
+    bool partialCaptions = false, badCaption = false, captionAuditFail = false, lateCaption = false;
     int invalidBranch = 0;
     int emptyBranch = 0;
     int longBranch = 0;
@@ -118,10 +118,12 @@ public:
                     const QString label = data.contains("BETA_") ? "BETA" : "ALPHA";
                     QString content;
                     if (system.contains("STAGE_V4_CAPTION_AUDIT")) {
-                        content = captionAuditFail ? R"({"pass":false,"reason":"unsupported claim"})" : R"({"pass":true,"reason":""})";
+                        content = partialCaptions ? R"({"approved_blocks":[0]})" : captionAuditFail ? R"({"pass":false,"reason":"unsupported claim"})" : R"({"pass":true,"reason":""})";
                     } else if (system.contains("STAGE_V4_CAPTIONS")) {
-                        content = lateCaption ? R"({"captions":[{"block":0,"offset_sec":4,"text":"A difficult choice","evidence_quote":"I must choose"}]})" : badCaption ? R"({"captions":[{"block":0,"text":"A difficult choice","evidence_quote":"invented"}]})"
+                        content = partialCaptions ? R"({"captions":[{"block":0,"offset_sec":1,"text":"A difficult choice","translation":"Трудный выбор","evidence_quote":"I must choose"},{"block":1,"text":"Wrong quote","evidence_quote":"invented"},{"block":2,"text":"Another choice","translation":"Другой выбор","evidence_quote":"I chose"}]})" : lateCaption ? R"({"captions":[{"block":0,"offset_sec":4,"text":"A difficult choice","evidence_quote":"I must choose"}]})" : badCaption ? R"({"captions":[{"block":0,"text":"A difficult choice","evidence_quote":"invented"}]})"
                             : R"({"captions":[{"block":0,"offset_sec":1,"text":"A difficult choice","viewer_gap":"Why he hesitates","evidence_quote":"I must choose"}]})";
+                    } else if (system.contains("STAGE_V5_DISCOVERY")) {
+                        content = R"({"candidates":[{"title":"shared decision","expectation":"Will they agree?","payoff":"agreement","hook_event":"C1E1","payoff_event":"C1E7"},{"title":"another angle","expectation":"Who gives in?","payoff":"agreement","hook_event":"C1E1","payoff_event":"C1E7"},{"title":"invalid candidate","expectation":"?","payoff":"unknown","hook_event":"BAD","payoff_event":"BAD"}]})";
                     } else if (system.contains("STAGE_INDEX")) {
                         ++indexes;
                         QJsonArray events;
@@ -295,19 +297,21 @@ static void runTests(const QString& python)
     settings.s3QuoteCheck = true;
     settings.agentFramesEnabled = false;
     settings.llmApiKey.clear();
-    for (int scenarioId = 0; scenarioId < 4; ++scenarioId) {
+    for (int scenarioId = 0; scenarioId < 5; ++scenarioId) {
         MockLlm mock; mock.badCaption = scenarioId == 1; mock.captionAuditFail = scenarioId == 2; mock.lateCaption = scenarioId == 3;
         settings.llmBaseUrl = mock.url(); LlmClient captionClient; QEventLoop loop;
+        mock.partialCaptions = scenarioId == 4; captionClient.setV5Discovery(mock.partialCaptions);
         bool completed = false, passed = false;
         QTimer timer; timer.setSingleShot(true); timer.start(5000);
         QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-        captionClient.createSceneCaptionsV4({{1, 0, 5, "I must choose"}}, {}, "en",
+        captionClient.createSceneCaptionsV4({{1, 0, 5, "I must choose"}, {2, 5, 10, "Actually"}, {3, 10, 15, "I chose"}}, {5, 10}, "en",
             [&](bool ok, const QList<SrtCue>& captions, const QString&) {
                 completed = true; passed = ok;
                 if (ok) require(captions.size() == 1 && captions.first().startSec == 1 && captions.first().endSec <= 5, "invalid caption timing");
+                if (mock.partialCaptions && ok) require(captions.first().translation == "Трудный выбор", "approved translation lost");
                 loop.quit();
-            });
-        loop.exec(); require(completed && passed == (scenarioId == 0), "caption evidence/audit validation failed");
+            }, {}, mock.partialCaptions ? "ru" : "");
+        loop.exec(); require(completed && passed == (scenarioId == 0 || scenarioId == 4), "caption evidence/audit validation failed");
         require(mock.requests.size() == ((scenarioId == 1 || scenarioId == 3) ? 1 : 2), "caption validation request count wrong");
         const auto requestText = mock.requests.first()["messages"].toArray().last().toObject()["content"].toString();
         require(requestText.contains("film_events") && requestText.contains("source_phrases") && requestText.contains("clip_start"),
@@ -480,12 +484,21 @@ static void runTests(const QString& python)
         MockLlm scenario; scenario.visualPlan = true; scenario.visualUnresolved = unresolved;
         settings.llmBaseUrl = scenario.url();
         LlmClient candidate; QEventLoop loop;
+        candidate.setV5Discovery(!unresolved);
         bool success = false, failed = false;
         QObject::connect(&candidate, &LlmClient::storiesFound, &loop, [&](const QList<StoryClip>&, const QJsonArray&) { success = true; loop.quit(); });
         QObject::connect(&candidate, &LlmClient::errorOccurred, &loop, [&](const QString&) { failed = true; loop.quit(); });
         QTimer timeout; timeout.setSingleShot(true);
         QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
         timeout.start(10000); candidate.findStoriesV3(info, packed, phrases); loop.exec();
+        for (const auto& req : scenario.requests) {
+            const auto msgs = req["messages"].toArray();
+            if (msgs.first().toObject()["content"].toString().contains("STAGE_PLAN")) {
+                const auto prompt = msgs.last().toObject()["content"].toString();
+                require(prompt.contains("shared decision") == !unresolved && prompt.contains("another angle") == !unresolved && !prompt.contains("invalid candidate"),
+                        "V5 candidates lost, ungrounded, or leaked into V3");
+            }
+        }
         require(scenario.replans == 2, "each visual branch must have exactly one replan");
         require(unresolved ? (failed && !success && scenario.reviews == 0) : (success && !failed && scenario.reviews == 2),
                 "visual evidence repair must recover or reject without bypassing audits");
@@ -725,6 +738,26 @@ int main(int argc, char** argv)
             require(argc == 5, "--retry-logged-v3 settings.json original.request.json new-log-directory (requires explicit approval)");
             retryLoggedV3Request(app.arguments()); return 0;
         }
+        if (app.arguments().contains("--render-v5-story")) {
+            const auto a = app.arguments();
+            require(argc == 9 || argc == 10, "--render-v5-story source final_edl.json story-number audio-index subtitles.ass output.mp4 plan.json");
+            QFile edl(a[3]); require(edl.open(QIODevice::ReadOnly), "cannot open EDL");
+            const auto stories = QJsonDocument::fromJson(edl.readAll()).object()["stories"].toArray();
+            const int number = a[4].toInt();
+            require(number > 0 && number <= stories.size(), "invalid story number");
+            QList<QPair<double, double>> ranges;
+            for (const auto& segment : stories[number-1].toObject()["segments"].toArray())
+                ranges.append({segment.toObject()["start_time"].toDouble(), segment.toObject()["end_time"].toDouble()});
+            require(!ranges.isEmpty(), "empty EDL");
+            ClipRenderer renderer;
+            QObject::connect(&renderer, &ClipRenderer::clipRendered, &app, &QCoreApplication::quit);
+            QObject::connect(&renderer, &ClipRenderer::logMessage, &app, [](const QString& text) { qInfo().noquote() << text; });
+            QObject::connect(&renderer, &ClipRenderer::errorOccurred, &app, [&](const QString& error) {
+                qCritical().noquote() << error; app.exit(1);
+            });
+            QTimer::singleShot(0, &app, [&] { renderer.renderV5Story(a[2], ranges, a[5].toInt(), a[6], a[7], a[8], a.value(9)); });
+            return app.exec();
+        }
         if (app.arguments().contains("--render-v3")) {
             require(argc == 8, "--render-v3 settings.json source packed.md clean-words.json evaluation_result.json output-directory");
             renderV3Evaluation(app.arguments()); return 0;
@@ -736,6 +769,12 @@ int main(int argc, char** argv)
         if (app.arguments().contains("--live-v3") || app.arguments().contains("--preview-v3")) {
             require(argc == 8 || argc == 9, "--live-v3 settings.json source packed.md import-log-dir-or-dash output-dir count [request-budget<=36]");
             liveV3Run(app.arguments()); return 0;
+        }
+        if (app.arguments().contains("--compose-v5")) {
+            require(argc == 4, "--compose-v5 input.srt output.ass");
+            require(SubtitleComposer::writeAssV4(SrtUtils::parseFile(app.arguments()[2]), {}, app.arguments()[3],
+                58, {}, true), "cannot compose V5");
+            return 0;
         }
         if (app.arguments().contains("--compose-v4")) {
             require(argc == 4, "--compose-v4 input.srt output.ass");

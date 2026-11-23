@@ -19,9 +19,16 @@ public:
     // crossfadeSec > 0 — xfade/acrossfade между сегментами.
     void renderStoryClip(const QString& inputPath, const QList<QPair<double, double>>& segments,
                          int audioIndex, const QString& srtPath, const QString& outPath,
-                         double crossfadeSec = 0.0, bool verifyOutput = false);
+                         double crossfadeSec = 0.0, bool verifyOutput = false,
+                         const QStringList& framing = {}, const QString& music = {},
+                         int firstMusicShot = -1, double hook = 0);
+
+    void renderV5Story(const QString& source, const QList<QPair<double, double>>& segments,
+                       int audio, const QString& subtitles, const QString& output, const QString& plan,
+                       const QString& track = {}, double reactionRoom = 0);
 
 signals:
+    void logMessage(const QString& message);
     void clipRendered(const QString& outPath);
     void errorOccurred(const QString& errorMessage);
 

@@ -109,7 +109,9 @@ void Stories3Runner::runDiarizeSherpa(const QString& wavPath, const QString& out
 {
     const AppSettings& s = AppSettings::instance();
     QStringList args;
+    emit logMessage("Диаризация sherpa-onnx: " + s.s3SherpaDevice.toUpper());
     args << scriptPath("diarize_sherpa.py")
+         << "--device" << s.s3SherpaDevice
          << "--wav" << wavPath
          << "--out" << outJson
          << "--threshold" << QString::number(threshold, 'f', 2)
@@ -124,7 +126,12 @@ void Stories3Runner::runDiarizePyannote(const QString& wavPath, const QString& o
 {
     // pyannote живёт в другом venv (.venv-diar) — путь берём из старых настроек
     const AppSettings& s = AppSettings::instance();
-    QString py = s.pythonPath.isEmpty() ? pythonPath() : s.pythonPath;
+    QString py = s.pythonPath;
+    if (py.isEmpty()) {
+        const QString sibling = QFileInfo(pythonPath()).dir().absoluteFilePath(
+            "../../.venv-diar/Scripts/python.exe");
+        py = QFileInfo::exists(sibling) ? QDir::cleanPath(sibling) : pythonPath();
+    }
 
     QStringList args;
     args << scriptPath("diarize.py")
@@ -134,31 +141,7 @@ void Stories3Runner::runDiarizePyannote(const QString& wavPath, const QString& o
     if (!hfToken.isEmpty())
         args << "--hf-token" << hfToken;
 
-    if (m_proc) {
-        emit failed(S3Stage::DiarizePyannote, "Уже выполняется другой шаг Пересказа 3.0.");
-        return;
-    }
-    // переопределяем python на время запуска
-    m_stage = S3Stage::DiarizePyannote;
-    QProcess* proc = new QProcess(this);
-    m_proc = proc;
-    m_outPath = outJson;
-    m_errBuffer.clear();
-
-    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this](int code, QProcess::ExitStatus st) { onFinished(code, int(st)); });
-    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError e) {
-        if (e == QProcess::FailedToStart) {
-            QString err = QString("Не удалось запустить python: %1").arg(proc->program());
-            cancel();
-            emit failed(S3Stage::DiarizePyannote, err);
-        }
-    });
-
-    emit logMessage("Диаризация pyannote (может занять минуты)...");
-    proc->start(py, args);
-
-    m_timeout.start(3600000);
+    start(S3Stage::DiarizePyannote, args, outJson, 3600000, py);
 }
 
 void Stories3Runner::runMerge(const QString& wordsJson, const QString& outSrt,
@@ -190,7 +173,7 @@ void Stories3Runner::runMerge(const QString& wordsJson, const QString& outSrt,
 }
 
 void Stories3Runner::start(S3Stage stage, const QStringList& args,
-                           const QString& outPath, int timeoutMs)
+                           const QString& outPath, int timeoutMs, const QString& interpreter)
 {
     if (m_proc) {
         emit failed(stage, "Уже выполняется другой шаг Пересказа 3.0.");
@@ -234,7 +217,7 @@ void Stories3Runner::start(S3Stage stage, const QStringList& args,
     });
 
     emit logMessage(QString("Пересказ 3.0: python %1 ...").arg(args.first()));
-    proc->start(pythonPath(), args);
+    proc->start(interpreter.isEmpty() ? pythonPath() : interpreter, args);
 
     if (timeoutMs > 0)
         m_timeout.start(timeoutMs);

@@ -112,6 +112,7 @@ public:
     // диаризация sherpa-onnx: порог кластеризации (БОЛЬШЕ = МЕНЬШЕ спикеров!)
     double s3DiarThreshold = 1.2;
     // потоки CPU — главный рычаг скорости (GPU в sherpa не помогает, проверено)
+    QString s3SherpaDevice = "cpu";
     int s3DiarThreads = 12;
 
     // фильтрация галлюцинаций

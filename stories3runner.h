@@ -95,7 +95,7 @@ signals:
 
 private:
     void start(S3Stage stage, const QStringList& args, const QString& outPath,
-               int timeoutMs);
+               int timeoutMs, const QString& interpreter = {});
     void onFinished(int exitCode, int exitStatus);
     void onTimeout();
 

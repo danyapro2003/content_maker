@@ -32,9 +32,11 @@ public:
     void setAnalysisDirectory(const QString& directory) { m_analysisDirectory = directory; }
     bool importEventMapV3(const QString& logDirectory, QString& error);
     void setImportLogDirectory(const QString& directory) { m_importLogDirectory = directory; }
+    void setV5Discovery(bool enabled) { m_v5Discovery = enabled; }
     void checkModelFormat(const QString& logDirectory);
     void createSceneCaptionsV4(const QList<SrtCue>& words, const QList<double>& cuts, const QString& language,
-        const std::function<void(bool, const QList<SrtCue>&, const QString&)>& callback, const StoryClip& story = {});
+        const std::function<void(bool, const QList<SrtCue>&, const QString&)>& callback, const StoryClip& story = {},
+        const QString& translationLanguage = {});
     void setOfflinePreview(bool enabled) { m_offlinePreview = enabled; }
 
     // subsRu / subsEn — текст субтитров (может быть пустым, если отключено в настройках)
@@ -119,7 +121,9 @@ private:
     QString storyFramesInstructionsV3() const;
     bool acceptStoryPlanV3(const QString& content, QString& error);
     void reviewStoryDraftV3(const QList<StoryClip>& draft);
-    void startStoryPlanV3();
+    void discoverStoriesV5();
+    void startStoryPlanV3(const QJsonArray& candidates = {});
+    bool m_v5Discovery = false;
     void nextEventChunkV3();
     void handleEventResponseV3(const QJsonObject& response);
     void auditStoryV3(bool fidelity);

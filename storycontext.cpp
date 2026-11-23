@@ -148,7 +148,7 @@ QStringList unitsForReferences(const QJsonObject& request, const QJsonArray& eve
     result.removeDuplicates(); return result;
 }
 StoryProtocol::ParseResult<QJsonArray> plans(const QJsonObject& response, const QJsonArray& events,
-    const QList<SourceUnit>& units, int target, int maximum, int reserve, double minSec, double maxSec, int maxContext)
+    const QList<SourceUnit>& units, int target, int maximum, int reserve, double minSec, double maxSec, int maxContext, bool allowVariants)
 {
     StoryProtocol::ParseResult<QJsonArray> result;
     auto fail = [&](const QString& code, const QString& id, const QString& field, const QString& reason) {
@@ -185,7 +185,7 @@ StoryProtocol::ParseResult<QJsonArray> plans(const QJsonObject& response, const 
         for (const auto& field : {"title", "goal", "summary", "ending", "hook_reason"})
             if (branch[field].toString().trimmed().isEmpty()) fail("MISSING_PLAN_FIELD", id, field, "Поле должно быть непустой строкой");
         const auto goal = branch["goal"].toString().simplified().toLower();
-        if (goals.contains(goal)) fail("DUPLICATE_PLAN", id, "goal", "Повторяется замысел");
+        if (!allowVariants && goals.contains(goal)) fail("DUPLICATE_PLAN", id, "goal", "Повторяется замысел");
         goals.insert(goal);
         if (branch["opening_mode"] != "natural" && branch["opening_mode"] != "cold_open")
             fail("INVALID_OPENING", id, "opening_mode", "Нужно natural или cold_open");
@@ -200,7 +200,7 @@ StoryProtocol::ParseResult<QJsonArray> plans(const QJsonObject& response, const 
         }
         auto identity = used.values(); std::sort(identity.begin(), identity.end());
         const auto fingerprint = ending + ":" + identity.join(",");
-        if (endings.contains(fingerprint)) fail("DUPLICATE_PLAN", id, "required_events", "Одинаковые обязательные события и финал");
+        if (!allowVariants && endings.contains(fingerprint)) fail("DUPLICATE_PLAN", id, "required_events", "Одинаковые обязательные события и финал");
         endings.insert(fingerprint);
         if (v2) {
             QMap<QString, QStringList> dependencies;

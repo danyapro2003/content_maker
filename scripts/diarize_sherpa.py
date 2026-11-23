@@ -42,6 +42,21 @@ def read_wav(path):
 
 
 def build(seg_model, emb_model, num_speakers=-1, threshold=0.9, threads=2, provider="cpu"):
+    # The Windows sherpa wheel ships a CPU-only onnxruntime.dll. Load the
+    # installed GPU runtime in this child process before importing sherpa.
+    if provider == "cuda" and os.name == "nt":
+        import ctypes
+        from importlib.util import find_spec
+        from pathlib import Path
+
+        spec = find_spec("onnxruntime")
+        runtime = Path(spec.origin).parent / "capi" if spec and spec.origin else None
+        if runtime is None or not (runtime / "onnxruntime_providers_cuda.dll").is_file():
+            raise RuntimeError("CUDA: установи onnxruntime-gpu в Python для ASR или выбери CPU.")
+        # Keep directory handles and the native runtime alive during inference.
+        global _cuda_libraries
+        _cuda_libraries = [os.add_dll_directory(path) for path in [str(runtime), *gpu_env.ADDED_DIRS]]
+        _cuda_libraries.append(ctypes.WinDLL(str(runtime / "onnxruntime.dll")))
     import sherpa_onnx as so
 
     cfg = so.OfflineSpeakerDiarizationConfig(
@@ -58,7 +73,15 @@ def build(seg_model, emb_model, num_speakers=-1, threshold=0.9, threads=2, provi
     )
     if not cfg.validate():
         raise RuntimeError("невалидный конфиг диаризации — проверь пути к моделям")
-    return so.OfflineSpeakerDiarization(cfg)
+    diarizer = so.OfflineSpeakerDiarization(cfg)
+    if provider == "cuda" and os.name == "nt":
+        get_module = ctypes.windll.kernel32.GetModuleHandleW
+        get_module.argtypes = [ctypes.c_wchar_p]
+        get_module.restype = ctypes.c_void_p
+        if not get_module("onnxruntime_providers_cuda.dll"):
+            raise RuntimeError("Sherpa не загрузила CUDA provider. Проверь установку CUDA или выбери CPU.")
+        print("[diarize_sherpa] CUDA provider loaded (segmentation + embedding requested)", flush=True)
+    return diarizer
 
 
 def main():

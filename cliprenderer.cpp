@@ -3,6 +3,9 @@
 #include "cliprenderer.h"
 #include "appsettings.h"
 #include <QProcess>
+#include <QDir>
+#include <QCoreApplication>
+#include <QSaveFile>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -130,9 +133,77 @@ void ClipRenderer::renderClip(const QString& inputPath, double startSec, double 
     startFfmpeg(args, workDir, outPath, dur, 1, verifyOutput);
 }
 
+void ClipRenderer::renderV5Story(const QString& source, const QList<QPair<double, double>>& segments,
+                                 int audio, const QString& subtitles, const QString& output, const QString& plan,
+                                 const QString& track, double reactionRoom)
+{
+    const auto render = [=]() {
+        QFile file(plan);
+        if (!file.open(QIODevice::ReadOnly)) { emit errorOccurred("V5: не удалось открыть траекторию кропа."); return; }
+        QStringList filters;
+        const auto doc = QJsonDocument::fromJson(file.readAll());
+        const auto planData = doc.object();
+        auto ranges = segments;
+        const double held = planData["reaction"].toDouble();
+        if (held > 0) {
+            ranges.last().second += held;
+            emit logMessage(QString("V5: сохраняю %1 с после реплики в том же плане.").arg(held, 0, 'f', 2));
+        }
+        for (const auto& value : planData["shots"].toArray()) {
+            const auto pair = value.toArray();
+            if (pair.size() != 2 || pair[1].toDouble() <= pair[0].toDouble()) {
+                emit errorOccurred("V5: некорректный интервал музыкального финала."); return;
+            }
+            ranges.append({pair[0].toDouble(), pair[1].toDouble()});
+        }
+        for (const auto& item : (doc.isArray() ? doc.array() : planData["filters"].toArray())) {
+            if (!item.isString() || item.toString().isEmpty()) break;
+            filters.append(item.toString());
+        }
+        if (filters.size() != ranges.size() || filters.isEmpty()) {
+            emit errorOccurred("V5: траектория не соответствует монтажному листу."); return;
+        }
+        const bool hasEnding = ranges.size() > segments.size();
+        if (!track.isEmpty())
+            emit logMessage(hasEnding ? QString("V5: музыкальный финал — %1, кадровых фрагментов %2.").arg(QFileInfo(track).fileName()).arg(ranges.size()-segments.size())
+                                      : QString("V5: для музыкального финала недостаточно материала, акцентов или времени."));
+        renderStoryClip(source, ranges, audio, subtitles, output, 0, true, filters,
+                        hasEnding ? track : QString(), segments.size(), planData["hook"].toDouble());
+    };
+    if (QFileInfo::exists(plan)) {
+        emit logMessage("V5: использую готовое кадрирование этой истории.");
+        render(); return;
+    }
+    const auto dir = QCoreApplication::applicationDirPath();
+    const auto python = QDir(dir).absoluteFilePath("../v5_edit_env/Scripts/python.exe");
+    const auto& settings = AppSettings::instance();
+    QStringList args{dir + "/scripts/v5_framing.py", source, plan,
+                     settings.s3ModelDir + "/face_detection_yunet_2023mar.onnx", settings.ffmpegPath};
+    for (const auto& seg : segments)
+        args << QString::number(seg.first, 'f', 3) << QString::number(seg.second, 'f', 3);
+    if (!track.isEmpty()) args << "--track" << track;
+    args << "--reaction-room" << QString::number(reactionRoom) << "--limit" << QString::number(settings.s3MaxClipSec);
+    auto proc = new QProcess(this);
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, python](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart) {
+            proc->deleteLater(); emit errorOccurred("V5: не удалось запустить Python кадрирования: " + python);
+        }
+    });
+    connect(proc, &QProcess::finished, this, [this, proc, render](int code, QProcess::ExitStatus status) {
+        proc->deleteLater();
+        if (code || status != QProcess::NormalExit) {
+            emit errorOccurred("V5: ошибка кадрирования: " + QString::fromUtf8(proc->readAllStandardError()).right(1400)); return;
+        }
+        render();
+    });
+    emit logMessage("V5: определяю положение лиц и рассчитываю плавный кроп по планам.");
+    proc->start(python, args);
+}
+
 void ClipRenderer::renderStoryClip(const QString& inputPath, const QList<QPair<double, double>>& segments,
                                    int audioIndex, const QString& srtPath, const QString& outPath,
-                                   double crossfadeSec, bool verifyOutput)
+                                   double crossfadeSec, bool verifyOutput, const QStringList& framing,
+                                   const QString& music, int firstMusicShot, double hook)
 {
     if (segments.isEmpty()) {
         emit errorOccurred("renderStoryClip: пустой список сегментов");
@@ -160,6 +231,8 @@ void ClipRenderer::renderStoryClip(const QString& inputPath, const QList<QPair<d
              << "-i" << inputPath;
     }
 
+    if (!music.isEmpty()) args << "-ss" << QString::number(hook, 'f', 5) << "-i" << music;
+    double musicOffset = 0;
     // xfade требует, чтобы каждый сегмент был длиннее фейда (с запасом)
     bool useXfade = crossfadeSec > 0.0 && segments.size() > 1 && minDur > 2.0 * crossfadeSec;
     double fadeSec = AppSettings::instance().editAudioFadeMs / 1000.0;
@@ -168,10 +241,16 @@ void ClipRenderer::renderStoryClip(const QString& inputPath, const QList<QPair<d
     QString filter;
     for (int i = 0; i < segments.size(); ++i) {
         double dur = segments[i].second - segments[i].first;
-        filter += QString("[%1:v:0]setpts=PTS-STARTPTS[vp%1];").arg(i);
-        filter += QString("[%1:a:%2]asetpts=PTS-STARTPTS").arg(i).arg(audioIndex);
+        filter += framing.isEmpty() ? QString("[%1:v:0]setpts=PTS-STARTPTS[vp%1];").arg(i) : framing.at(i);
+        const bool musical = !music.isEmpty() && i >= firstMusicShot;
+        if (musical) {
+            filter += QString("[%1:a:0]atrim=start=%2:duration=%3,asetpts=PTS-STARTPTS,volume=0.7")
+                .arg(segments.size()).arg(musicOffset, 0, 'f', 4).arg(dur, 0, 'f', 4);
+            musicOffset += dur;
+            if (i + 1 == segments.size()) filter += QString(",afade=t=out:st=%1:d=0.15").arg(qMax(0.,dur-.15));
+        } else filter += QString("[%1:a:%2]asetpts=PTS-STARTPTS").arg(i).arg(audioIndex);
         // 30мс фейды на границах — убирают щелчки на склейках (hard rule video-use)
-        if (useFade && dur > 2.0 * fadeSec)
+        if (!musical && useFade && dur > 2.0 * fadeSec)
             filter += QString(",afade=t=in:st=0:d=%1,afade=t=out:st=%2:d=%1")
                           .arg(fadeSec, 0, 'f', 3).arg(dur - fadeSec, 0, 'f', 3);
         filter += QString("[ap%1];").arg(i);
@@ -205,15 +284,25 @@ void ClipRenderer::renderStoryClip(const QString& inputPath, const QList<QPair<d
     }
 
     // вертикаль 9:16 + прожиг сабов
-    filter += QString(
+    if (!framing.isEmpty()) filter += "[cv]" + subtitleFilter + "[v]";
+    else filter += QString(
         "[cv]split[x][y];"
         "[x]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,gblur=sigma=20[bg];"
         "[y]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
         "[bg][fg]overlay=(W-w)/2:(H-h)/2,"
         "%1[v]").arg(subtitleFilter);
 
-    args << "-filter_complex" << filter
-         << "-map" << "[v]"
+    if (framing.isEmpty()) args << "-filter_complex" << filter;
+    else {
+        const QString graphPath = srtPath + ".filter";
+        QSaveFile graph(graphPath);
+        const auto data = filter.toUtf8();
+        if (!graph.open(QIODevice::WriteOnly) || graph.write(data) != data.size() || !graph.commit()) {
+            emit errorOccurred("V5: не удалось сохранить фильтры рендера."); return;
+        }
+        args << "-/filter_complex" << graphPath;
+    }
+    args << "-map" << "[v]"
          << "-map" << "[ca]"
          << "-c:v" << "libx264"
          << "-preset" << "veryfast"

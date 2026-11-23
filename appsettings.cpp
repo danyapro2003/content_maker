@@ -154,6 +154,7 @@ bool AppSettings::load(const QString& path)
     s3ReviewChunkSec  = o.value("s3ReviewChunkSec").toDouble(s3ReviewChunkSec);
     s3ReviewMinAgree  = o.value("s3ReviewMinAgree").toDouble(s3ReviewMinAgree);
     s3DiarThreshold   = o.value("s3DiarThreshold").toDouble(s3DiarThreshold);
+    s3SherpaDevice = o.value("s3SherpaDevice").toString() == "cuda" ? "cuda" : "cpu";
     s3DiarThreads     = o.value("s3DiarThreads").toInt(s3DiarThreads);
     s3DropMusicLowConf = o.value("s3DropMusicLowConf").toBool(s3DropMusicLowConf);
     s3MinLogprob      = o.value("s3MinLogprob").toDouble(s3MinLogprob);
@@ -239,6 +240,7 @@ bool AppSettings::save() const
     o["s3ReviewChunkSec"]  = s3ReviewChunkSec;
     o["s3ReviewMinAgree"]  = s3ReviewMinAgree;
     o["s3DiarThreshold"]   = s3DiarThreshold;
+    o["s3SherpaDevice"] = s3SherpaDevice;
     o["s3DiarThreads"]     = s3DiarThreads;
     o["s3DropMusicLowConf"] = s3DropMusicLowConf;
     o["s3MinLogprob"]      = s3MinLogprob;

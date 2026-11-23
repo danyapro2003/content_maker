@@ -6,6 +6,7 @@
 #include "appsettings.h"
 #include "storytimeline.h"
 #include <QFile>
+#include <QCoreApplication>
 #include <QFileInfo>
 #include <QDir>
 #include <QJsonDocument>
@@ -100,6 +101,7 @@ PipelineManager::PipelineManager(QObject *parent) : QObject(parent)
         finishStoryPacking();
     });
 
+    connect(&renderer, &ClipRenderer::logMessage, this, &PipelineManager::logMessage);
     connect(&renderer, &ClipRenderer::clipRendered, this, &PipelineManager::onClipRendered);
     connect(&renderer, &ClipRenderer::errorOccurred, this, &PipelineManager::onErrorOccurred);
 }
@@ -205,6 +207,7 @@ void PipelineManager::startPipeline(const QString& path)
     m_pendingSubExtracts.clear();
     m_subsCandidates.clear();
     m_renderTasks.clear();
+    m_translatedSceneCaptions.clear();
     m_taskIndex = -1;
     m_audioPurpose = AudioPurpose::None;
     m_cues.clear();
@@ -1123,25 +1126,45 @@ void PipelineManager::renderTaskWithSrt(const QString& srtPath)
         return;
     const RenderTask& task = m_renderTasks[m_taskIndex];
     QString subtitlePath = srtPath;
-    if (m_mode == Mode::Stories4) {
+    if (m_mode == Mode::Stories4 || m_mode == Mode::Stories5) {
         QList<double> cuts; double position = 0;
         for (int i = 0; i + 1 < task.segments.size(); ++i) {
             position += task.segments[i].second - task.segments[i].first; cuts.append(position);
         }
         const auto words = SrtUtils::parseFile(srtPath);
-        const QString assPath = task.srtBase + ".v4.ass";
+        const QString assPath = task.srtBase + (m_mode == Mode::Stories5 ? ".v5.ass" : ".v4.ass");
         const int taskIndex = m_taskIndex;
         const QString runDirectory = m_runLogDirectory;
-        emit logMessage("V4: создаю пояснения сцен по выбранным репликам и проверяю их смысл.");
-        llm.createSceneCaptionsV4(words, cuts, task.lang,
-            [this, words, cuts, assPath, taskIndex, runDirectory](bool ok, const QList<SrtCue>& captions, const QString& error) {
-                if (!m_fileActive || m_taskIndex != taskIndex || m_runLogDirectory != runDirectory) return;
-                if (!ok) { onErrorOccurred("V4: пояснения сцен не прошли проверку: " + error); return; }
-                if (!SubtitleComposer::writeAssV4(words, captions, assPath, AppSettings::instance().s3SubtitleFontSize, cuts)) {
-                    onErrorOccurred("V4: не удалось сохранить субтитры."); return;
-                }
-                renderTaskWithSubtitles(assPath);
-            }, m_stories.value(task.clipIndex));
+        const QString label = QString("%1 [%2, история %3]").arg(m_mode == Mode::Stories5 ? "V5" : "V4", task.lang).arg(task.clipIndex + 1);
+        const auto key = qMakePair(task.clipIndex, task.lang);
+        QString translationLanguage;
+        if (m_mode == Mode::Stories5 && m_taskIndex + 1 < m_renderTasks.size()) {
+            const auto& next = m_renderTasks[m_taskIndex + 1];
+            if (next.clipIndex == task.clipIndex && next.lang != task.lang) translationLanguage = next.lang;
+        }
+        auto compose = [this, words, cuts, assPath, taskIndex, runDirectory, label, translationLanguage](bool ok, const QList<SrtCue>& captions, const QString& error) {
+            if (!m_fileActive || m_taskIndex != taskIndex || m_runLogDirectory != runDirectory) return;
+            if (!ok && m_mode == Mode::Stories5) emit logMessage(label + ": собираю черновик без пояснений. " + error);
+            else if (!ok) { onErrorOccurred("V4: пояснения сцен не прошли проверку: " + error); return; }
+            if (!translationLanguage.isEmpty()) {
+                QList<SrtCue> translated;
+                for (const auto& cue : captions)
+                    translated.append({cue.index, cue.startSec, cue.endSec, cue.translation});
+                m_translatedSceneCaptions.insert({m_renderTasks[taskIndex].clipIndex, translationLanguage}, translated);
+            }
+            if (!SubtitleComposer::writeAssV4(words, captions, assPath, AppSettings::instance().s3SubtitleFontSize, cuts, m_mode == Mode::Stories5)) {
+                onErrorOccurred("V4: не удалось сохранить субтитры."); return;
+            }
+            emit logMessage(label + QString(": пояснений в ролике — %1.").arg(captions.size()));
+            renderTaskWithSubtitles(assPath);
+        };
+        if (m_translatedSceneCaptions.contains(key)) {
+            emit logMessage(label + ": применяю перевод пояснений с общим таймингом.");
+            compose(true, m_translatedSceneCaptions.take(key), {});
+        } else {
+            emit logMessage(label + ": создаю пояснения сцен и проверяю их смысл.");
+            llm.createSceneCaptionsV4(words, cuts, task.lang, compose, m_stories.value(task.clipIndex), translationLanguage);
+        }
         return;
     }
     if (isNarrativeMode()) {
@@ -1167,6 +1190,15 @@ void PipelineManager::renderTaskWithSubtitles(const QString& subtitlePath)
 {
     if (m_taskIndex < 0 || m_taskIndex >= m_renderTasks.size()) return;
     const RenderTask& task = m_renderTasks[m_taskIndex];
+    if (m_mode == Mode::Stories5 && task.isStory) {
+        const auto plan = m_renderTempDirectory + QString("/crop_story_%1.json").arg(task.clipIndex + 1);
+        const double end = task.segments.last().second;
+        double room = m_s3Words.isEmpty() ? 0. : qBound(0., currentInfo.durationSec - end, 1.2);
+        for (const auto& word : m_s3Words)
+            if (word.endSec > end) room = qMin(room, qMax(0., word.startSec - end - .08));
+        renderer.renderV5Story(currentFilePath, task.segments, task.audioIndex, subtitlePath, task.outPath, plan, {}, room);
+        return;
+    }
     if (task.isStory && task.segments.size() > 1) {
         emit logMessage(QString("Рендер пересказа %1 [%2]...")
                             .arg(task.clipIndex + 1).arg(task.lang));
@@ -1188,6 +1220,42 @@ void PipelineManager::onClipRendered(const QString& outPath)
     if (!QFileInfo(outPath).isFile() || QFileInfo(outPath).size() <= 0) {
         onErrorOccurred("Рендер сообщил об успехе, но файл отсутствует или пуст: " + outPath); return;
     }
+    if (m_mode == Mode::Stories5 && m_v5Background) {
+        const auto task = m_renderTasks[m_taskIndex];
+        const QDir app(QCoreApplication::applicationDirPath());
+        const QString output = outPath.chopped(4) + "_music.mp4";
+        const QString plan = m_runLogDirectory + QString("/background_story_%1.json").arg(task.clipIndex+1);
+        auto* proc = new QProcess(this);
+        auto env = QProcessEnvironment::systemEnvironment();
+        env.insert("PYTHONIOENCODING", "utf-8");
+        proc->setProcessEnvironment(env);
+        connect(proc, &QProcess::errorOccurred, this, [this,proc,outPath](QProcess::ProcessError e) {
+            if (e != QProcess::FailedToStart) return;
+            emit logMessage("V5: фоновая музыка недоступна. " + proc->errorString());
+            proc->deleteLater(); recordRenderedTask(outPath);
+        });
+        connect(proc, &QProcess::finished, this, [this,proc,output,outPath](int code,QProcess::ExitStatus status) {
+            proc->deleteLater();
+            if (code || status != QProcess::NormalExit) {
+                emit logMessage("V5: сохраняю оригинальный звук. Ошибка подбора или сведения: " +
+                                QString::fromUtf8(proc->readAllStandardError()).trimmed().right(600));
+                recordRenderedTask(outPath); return;
+            }
+            emit logMessage("V5: " + QString::fromUtf8(proc->readAllStandardOutput()).trimmed());
+            if (QFileInfo::exists(output)) emit logMessage("Версия с оригинальным звуком: " + outPath);
+            recordRenderedTask(QFileInfo::exists(output) ? output : outPath);
+        });
+        emit logMessage("V5: подбираю фон для истории по карточкам библиотеки.");
+        proc->start(app.absoluteFilePath("../v5_edit_env/Scripts/python.exe"), {app.filePath("scripts/v5_music_mix.py"),
+            AppSettings::instance().settingsFilePath(), m_runLogDirectory + "/final_edl.json", tempDir + "/s3_audiomap.json",
+            plan, outPath, task.srtBase + ".v5.ass", output, QString::number(task.clipIndex)});
+        return;
+    }
+    recordRenderedTask(outPath);
+}
+
+void PipelineManager::recordRenderedTask(const QString& outPath)
+{
     m_runOutputs.append(outPath);
     if (m_renderTasks[m_taskIndex].isStory) m_renderedStoryIds.insert(m_renderTasks[m_taskIndex].clipIndex);
     emit logMessage("Клип готов: " + outPath);

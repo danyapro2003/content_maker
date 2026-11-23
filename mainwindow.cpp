@@ -23,6 +23,8 @@
 #include <QStatusBar>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QListWidget>
+#include <QPlainTextEdit>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -69,6 +71,7 @@ MainWindow::MainWindow(QWidget *parent)
     ui->clips_tw->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Stretch);
 
     AppSettings::instance().load();
+    buildV5Tab();
     buildSettingsTab();
     loadSettingsToUi();
 }
@@ -78,10 +81,14 @@ MainWindow::~MainWindow()
     delete ui;
 }
 
+static QString timedLog(const QString& msg)
+{
+    return QString("[%1] %2").arg(QDateTime::currentDateTime().toString("HH:mm:ss"), msg);
+}
+
 void MainWindow::appendLog(const QString& msg)
 {
-    ui->log_te->append(QString("[%1] %2")
-                           .arg(QDateTime::currentDateTime().toString("HH:mm:ss"), msg));
+    ui->log_te->append(timedLog(msg));
 }
 
 static QString secToStr(double sec)
@@ -136,17 +143,84 @@ void MainWindow::on_browse_folder_pb_clicked()
     }
 }
 
+void MainWindow::buildV5Tab()
+{
+    auto* page = new QWidget;
+    ui->tabWidget->addTab(page, "Пересказ V5");
+    auto* layout = new QVBoxLayout(page);
+    auto* row = new QHBoxLayout;
+    layout->addLayout(row);
+    auto* path = new QLineEdit(ui->browse_le->text(), page);
+    path->setPlaceholderText("Исходный фильм");
+    row->addWidget(path);
+    auto* browse = new QPushButton("Файл…", page);
+    row->addWidget(browse);
+    connect(browse, &QPushButton::clicked, page, [this, path]() {
+        const auto file = QFileDialog::getOpenFileName(this, "Исходный фильм", path->text(), "Видео (*.mkv *.mp4 *.avi *.m4v *.webm)");
+        if (!file.isEmpty()) path->setText(file);
+    });
+    auto* musicRow = new QHBoxLayout;
+    layout->addLayout(musicRow);
+    auto* background = new QCheckBox("Подбирать фоновую музыку из библиотеки", page);
+    musicRow->addWidget(background);
+    auto* library = new QPushButton("Библиотека музыки…", page);
+    musicRow->addWidget(library);
+    auto* window = new QProcess(page);
+    connect(library, &QPushButton::clicked, page, [window, library]() {
+        const QDir dir(QCoreApplication::applicationDirPath());
+        library->setEnabled(false);
+        window->start(dir.absoluteFilePath("../v5_edit_env/Scripts/pythonw.exe"),
+                      {dir.filePath("scripts/v5_music_window.py"), AppSettings::instance().settingsFilePath()});
+    });
+    auto* start = new QPushButton("Подобрать истории и собрать черновики", page);
+    layout->addWidget(start);
+    auto* log = new QPlainTextEdit(page);
+    log->setReadOnly(true); layout->addWidget(log);
+    connect(window, &QProcess::finished, page, [window, log, library](int code, QProcess::ExitStatus) {
+        library->setEnabled(true);
+        if (code) log->appendPlainText(timedLog("Ошибка библиотеки: " + QString::fromUtf8(window->readAllStandardError()).right(800)));
+    });
+    connect(window, &QProcess::errorOccurred, page, [window, library, log](QProcess::ProcessError) {
+        library->setEnabled(true); log->appendPlainText(timedLog("Ошибка запуска библиотеки: " + window->errorString()));
+    });
+    auto* clips = new QListWidget(page);
+    layout->addWidget(clips);
+    connect(start, &QPushButton::clicked, page, [this, path, background, log, clips, start]() {
+        if (!ui->start_pb->isEnabled()) { log->appendPlainText(timedLog("Дождитесь завершения текущей очереди.")); return; }
+        if (!QFileInfo(path->text().trimmed()).isFile()) { log->appendPlainText(timedLog("Выберите исходный фильм.")); return; }
+        Manager->setV5Background(background->isChecked());
+        clips->clear(); log->clear(); start->setEnabled(false);
+        startQueue(PipelineManager::Mode::Stories5, path->text().trimmed());
+    });
+    connect(Manager, &PipelineManager::logMessage, page, [log, start](const QString& msg) {
+        if (!start->isEnabled()) log->appendPlainText(timedLog(msg));
+    });
+    connect(Manager, &PipelineManager::queueSummaryReady, page, [clips, start](const QueueRunSummary& summary) {
+        if (!start->isEnabled()) clips->addItems(summary.outputs());
+    });
+    connect(Manager, &PipelineManager::queueFinished, page, [start]() { start->setEnabled(true); });
+    connect(clips, &QListWidget::itemActivated, page, [](QListWidgetItem* item) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(item->text()));
+    });
+}
+
 void MainWindow::on_start_pb_clicked()
 {
-    saveSettingsFromUi();
-
     const bool isStory = ui->mode_cb->currentIndex() >= 1;
-    Manager->setMode(ui->mode_cb->currentIndex() == 1
+    startQueue(ui->mode_cb->currentIndex() == 1
                          ? PipelineManager::Mode::Stories
                          : ui->mode_cb->currentIndex() == 3 ? PipelineManager::Mode::Stories4
                          : isStory
                                ? PipelineManager::Mode::Stories3
-                               : PipelineManager::Mode::Highlights);
+                               : PipelineManager::Mode::Highlights, ui->browse_le->text().trimmed());
+}
+
+void MainWindow::startQueue(PipelineManager::Mode mode, const QString& path)
+{
+    if (!ui->start_pb->isEnabled()) return;
+    saveSettingsFromUi();
+    Manager->setMode(mode);
+    const bool isStory = mode != PipelineManager::Mode::Highlights;
 
     // таблица: у «Пересказа» другие колонки, чем у «Хайлайтов»
     if (isStory) {
@@ -161,7 +235,7 @@ void MainWindow::on_start_pb_clicked()
     }
     ui->clips_tw->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
 
-    QString path = ui->browse_le->text().trimmed();
+
     QFileInfo fi(path);
 
     QStringList filesToProcess;
@@ -421,10 +495,13 @@ void MainWindow::buildSettingsTab()
                                   "1.2 → ~3 спикера, 1.0 → ~14, 0.7 → ~33. Рабочее значение — 1.2.");
     s3->addRow("Порог диаризации:", spS3DiarThreshold);
 
+    cbSherpaDevice = new QComboBox(this);
+    cbSherpaDevice->addItem("CPU", "cpu");
+    cbSherpaDevice->addItem("NVIDIA GPU (CUDA)", "cuda");
+    s3->addRow("Устройство sherpa-onnx:", cbSherpaDevice);
     spS3DiarThreads = new QSpinBox(this);
     spS3DiarThreads->setRange(1, 32);
-    spS3DiarThreads->setToolTip("Потоки CPU для диаризации. Главный рычаг скорости:\n"
-                                "2 → ×3.9, 8 → ×6.2, 12 → ×6.4. GPU в sherpa не помогает.");
+    spS3DiarThreads->setToolTip("Число потоков для операций на CPU.");
     s3->addRow("Потоки диаризации:", spS3DiarThreads);
 
     chkS3DropMusicLowConf = new QCheckBox("Выбрасывать неуверенные слова в музыке", this);
@@ -594,6 +671,7 @@ void MainWindow::loadSettingsToUi()
     spS3ReviewChunk->setValue(s.s3ReviewChunkSec);
     spS3ReviewAgree->setValue(s.s3ReviewMinAgree);
     spS3DiarThreshold->setValue(s.s3DiarThreshold);
+    cbSherpaDevice->setCurrentIndex(cbSherpaDevice->findData(s.s3SherpaDevice));
     spS3DiarThreads->setValue(s.s3DiarThreads);
     chkS3DropMusicLowConf->setChecked(s.s3DropMusicLowConf);
     spS3MinLogprob->setValue(s.s3MinLogprob);
@@ -680,6 +758,7 @@ void MainWindow::saveSettingsFromUi()
     s.s3ReviewChunkSec = spS3ReviewChunk->value();
     s.s3ReviewMinAgree = spS3ReviewAgree->value();
     s.s3DiarThreshold = spS3DiarThreshold->value();
+    s.s3SherpaDevice = cbSherpaDevice->currentData().toString();
     s.s3DiarThreads = spS3DiarThreads->value();
     s.s3DropMusicLowConf = chkS3DropMusicLowConf->isChecked();
     s.s3MinLogprob = spS3MinLogprob->value();

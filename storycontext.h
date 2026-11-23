@@ -24,5 +24,5 @@ BranchContext build(const QJsonObject& plan, const QJsonArray& events, const QLi
 QStringList unitsForReferences(const QJsonObject& request, const QJsonArray& events,
                                const QList<SourceUnit>& units, QString& error);
 StoryProtocol::ParseResult<QJsonArray> plans(const QJsonObject& response, const QJsonArray& events,
-    const QList<SourceUnit>& units, int target, int maximum, int reserve, double minSec, double maxSec, int maxContext);
+    const QList<SourceUnit>& units, int target, int maximum, int reserve, double minSec, double maxSec, int maxContext, bool allowVariants = false);
 }

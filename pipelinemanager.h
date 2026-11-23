@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QQueue>
+#include <QMap>
 #include <QSet>
 #include <QJsonArray>
 #include "mediaextractor.h"
@@ -35,10 +36,11 @@ class PipelineManager : public QObject
 public:
     explicit PipelineManager(QObject *parent = nullptr);
 
-    enum class Mode { Highlights, Stories, Stories3, Stories4 };
+    enum class Mode { Highlights, Stories, Stories3, Stories4, Stories5 };
 
     void addFilesToQueue(const QStringList& files);
-    void setMode(Mode mode) { m_mode = mode; }
+    void setV5Background(bool enabled) { m_v5Background = enabled; }
+    void setMode(Mode mode) { m_mode = mode; llm.setV5Discovery(mode == Mode::Stories5); }
     void setImportLogDirectory(const QString& directory) { llm.setImportLogDirectory(directory); }
     void setOfflinePreview(bool enabled) { llm.setOfflinePreview(enabled); }
 
@@ -104,7 +106,7 @@ private:
     void processNextRenderTask();
     void renderTaskWithSrt(const QString& srtPath);
     void renderTaskWithSubtitles(const QString& subtitlePath);
-    bool isNarrativeMode() const { return m_mode == Mode::Stories3 || m_mode == Mode::Stories4; }
+    bool isNarrativeMode() const { return m_mode == Mode::Stories3 || m_mode == Mode::Stories4 || m_mode == Mode::Stories5; }
 
     // Пересказ 3.0: субтитры клипа из чистого ASR-транскрипта (без whisper)
     QString buildS3ClipSrt(const RenderTask& task, const QString& srtBase);
@@ -157,12 +159,15 @@ private:
     QList<Highlight> m_highlights;
     QList<StoryClip> m_stories;
     QList<RenderTask> m_renderTasks;
+    QMap<QPair<int, QString>, QList<SrtCue>> m_translatedSceneCaptions;
     int m_taskIndex = -1;
 
     QList<SrtCue> m_cues; // реплики/слова — для снаппинга границ сегментов
     QList<SrtCue> m_s3Words; // Пересказ 3.0: word-level слова из s3_words.json
     QList<DiarSegment> m_diarSegs; // диаризация (опционально)
     QString m_packedText; // упакованный транскрипт для LLM (пересказ)
+    bool m_v5Background = false;
+    void recordRenderedTask(const QString& outPath);
     QString m_storyTranscriptLang;
     QString m_s3AudioKey;
 

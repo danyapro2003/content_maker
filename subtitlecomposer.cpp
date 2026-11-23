@@ -84,7 +84,7 @@ bool SubtitleComposer::writeAss(const QList<SrtCue>& words, const QString& path,
 
 
 bool SubtitleComposer::writeAssV4(const QList<SrtCue>& input, const QList<SrtCue>& captions,
-                                 const QString& path, int fontSize, const QList<double>& cuts)
+                                 const QString& path, int fontSize, const QList<double>& cuts, bool revealPhrase)
 {
     auto escape = [](QString text) {
         text.replace('\\', QChar(0xFF3C)); text.replace('{', QChar(0xFF5B)); text.replace('}', QChar(0xFF5D));
@@ -106,12 +106,43 @@ bool SubtitleComposer::writeAssV4(const QList<SrtCue>& input, const QList<SrtCue
         "Style: Word,Segoe UI,%1,&H00FFFFFF,&H00FFFFFF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,4,1,2,90,90,620,1\n"
         "Style: Scene,Segoe UI,48,&H006DE7FF,&H006DE7FF,&H00101010,&H80000000,-1,0,0,0,100,100,0,0,1,3,1,8,120,120,300,1\n\n[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n").arg(qBound(32, fontSize, 90));
+    int groupStart = 0;
+    int groupEnd = 0;
     for (int i = 0; i < words.size(); ++i) {
         const auto& word = words[i];
         double end = word.endSec;
         if (i + 1 < words.size()) end = qMin(end, words[i + 1].startSec);
         for (double cut : cuts) if (cut > word.startSec) end = qMin(end, cut);
         if (qRound64(end * 100) <= qRound64(word.startSec * 100)) continue;
+        if (revealPhrase) {
+            if (i >= groupEnd) {
+                groupStart = i;
+                groupEnd = i + 1;
+                int length = word.text.size();
+                while (groupEnd < words.size() && groupEnd - groupStart < 4) {
+                    const auto& prev = words[groupEnd - 1];
+                    const auto& next = words[groupEnd];
+                    const bool cutBetween = std::any_of(cuts.cbegin(), cuts.cend(), [&](double cut) {
+                        return prev.startSec < cut && cut <= next.startSec;
+                    });
+                    length += 1 + next.text.size();
+                    if (cutBetween || next.startSec - prev.endSec > .35 || length > 28
+                        || prev.text.endsWith('.') || prev.text.endsWith('?') || prev.text.endsWith('!')) break;
+                    ++groupEnd;
+                }
+            }
+            QStringList shown, hidden;
+            for (int j = groupStart; j < groupEnd; ++j)
+                (j <= i ? shown : hidden).append(escape(words[j].text));
+            QString line = shown.join(' ');
+            if (!hidden.isEmpty()) {
+                line += "{\\alpha&HFF&} " + hidden.join(' ');
+                end = words[i + 1].startSec;
+            }
+            document += QString("Dialogue: 1,%1,%2,Word,,0,0,0,,%3\n")
+                .arg(assTime(word.startSec), assTime(end), line);
+            continue;
+        }
         const int popMs = qMin(90, qMax(10, int((end - word.startSec) * 500)));
         document += QString("Dialogue: 1,%1,%2,Word,,0,0,0,,{\\fscx94\\fscy94\\t(0,%3,\\fscx100\\fscy100)}%4\n")
             .arg(assTime(word.startSec), assTime(end)).arg(popMs).arg(escape(word.text));

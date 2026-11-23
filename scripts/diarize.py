@@ -27,17 +27,14 @@ def main():
         sys.exit(3)
 
     # GPU, если доступен
-    try:
-        import torch
-        if torch.cuda.is_available():
-            pipeline.to(torch.device("cuda"))
-    except Exception:
-        pass
+    import torch
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    pipeline.to(device)
+    print(f"[pyannote] device={pipeline.device}", flush=True)
 
     # грузим wav через scipy — избегаем torchcodec/torchaudio
     # (torchcodec DLL на Windows часто падает с нативным крашем)
     import numpy as np
-    import torch
     from scipy.io import wavfile
 
     sample_rate, data = wavfile.read(args.audio)

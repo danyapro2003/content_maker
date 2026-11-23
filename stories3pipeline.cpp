@@ -88,6 +88,7 @@ QString Stories3Pipeline::cacheKey(const QString& cachePath) const
         params["engine"] = int(s.s3DiarEngine);
         params["threshold"] = s.s3DiarThreshold;
         params["threads"] = s.s3DiarThreads;
+        if (s.s3DiarEngine == AppSettings::DiarEngine::SherpaOnnx) params["device"] = s.s3SherpaDevice;
         params["model"] = s.pyannoteModel;
         params["pythonDiar"] = S3Cache::fileFingerprint(s.pythonPath);
         deps << m_runner.scriptPath("diarize.py") << m_runner.scriptPath("diarize_sherpa.py")

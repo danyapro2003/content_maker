@@ -10,6 +10,7 @@ struct SrtCue {
     double startSec = 0.0;
     double endSec = 0.0;
     QString text;
+    QString translation = {}; // Optional second-language text for a shared scene caption.
 };
 
 class SrtUtils
